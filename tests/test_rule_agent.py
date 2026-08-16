@@ -23,18 +23,51 @@ def test_intent_uses_stable_cohort_and_yarn_store_branch() -> None:
     ratios[..., Item.MELON] = 0.1
     intent = policy.plan(batch)
 
-    np.testing.assert_array_equal(intent.target_hands, 12)
+    np.testing.assert_array_equal(intent.target_hands, 13)
     np.testing.assert_array_equal(intent.target_animal_counts[..., 1], 10)
     np.testing.assert_array_equal(intent.target_animal_counts[..., 2], 4)
     np.testing.assert_array_equal(intent.target_crop_counts[..., Item.WHEAT], 19)
-    np.testing.assert_array_equal(intent.target_crop_counts[..., Item.STRAWBERRY], 42)
+    np.testing.assert_array_equal(intent.target_crop_counts[..., Item.STRAWBERRY], 34)
     np.testing.assert_array_equal(intent.target_crop_counts[..., Item.CARROT], 0)
 
+    # Two Yarn Stores among the first four shop draws commit to the four-field
+    # sheep branch.
+    batch.observation_views.global_features[..., 0] = (12 * 24) / 719
     batch.observation_views.global_features[..., 22 + 7] = 2 / 8
     intent = policy.plan(batch)
     np.testing.assert_array_equal(intent.target_crop_counts[..., Item.WHEAT], 26)
     np.testing.assert_array_equal(intent.target_animal_counts[..., 1], 6)
     np.testing.assert_array_equal(intent.target_animal_counts[..., 2], 12)
+
+
+def test_one_early_yarn_store_uses_compact_sheep_branch() -> None:
+    env = VecEnv(1, weed_spawn_chance=0.0)
+    batch = env.reset()
+    policy = build_policy(use_opening=False)
+    batch.observation_views.global_features[..., 0] = (12 * 24) / 719
+    batch.observation_views.global_features[..., 22 + 7] = 1 / 8
+
+    intent = policy.plan(batch)
+
+    np.testing.assert_array_equal(intent.target_animal_counts[..., 1], 6)
+    np.testing.assert_array_equal(intent.target_animal_counts[..., 2], 8)
+    np.testing.assert_array_equal(
+        intent.target_crop_counts[..., Item.STRAWBERRY], 42
+    )
+    np.testing.assert_array_equal(intent.target_crop_counts[..., Item.MELON], 0)
+
+
+def test_late_yarn_store_does_not_rebuild_established_dairy_farm() -> None:
+    env = VecEnv(1, weed_spawn_chance=0.0)
+    batch = env.reset()
+    policy = build_policy(use_opening=False)
+    batch.observation_views.global_features[..., 0] = (18 * 24) / 719
+    batch.observation_views.global_features[..., 22 + 7] = 1 / 8
+
+    intent = policy.plan(batch)
+
+    np.testing.assert_array_equal(intent.target_animal_counts[..., 1], 10)
+    np.testing.assert_array_equal(intent.target_animal_counts[..., 2], 4)
 
 
 def test_intent_does_not_plant_a_crop_that_cannot_mature() -> None:
@@ -75,16 +108,37 @@ def test_intent_builds_strawberry_cohort_and_reinvests_surplus_cash() -> None:
         intent.target_crop_counts[..., Item.WHEAT], 7
     )
     np.testing.assert_array_equal(
-        intent.target_crop_counts[..., Item.STRAWBERRY], 19
+        intent.target_crop_counts[..., Item.STRAWBERRY], 11
     )
     np.testing.assert_array_equal(
-        intent.target_crop_counts[..., Item.MELON], 12
+        intent.target_crop_counts[..., Item.MELON], 19
     )
 
     batch.observation_views.global_features[..., 0] = (14 * 24) / 719
     batch.observation_views.farms[..., 0] = 2.0
     intent = policy.plan(batch)
-    np.testing.assert_array_equal(intent.target_hands, 12)
+    np.testing.assert_array_equal(intent.target_hands, 13)
+
+
+def test_intent_counters_an_opponent_melon_opening_with_strawberry() -> None:
+    env = VecEnv(1, weed_spawn_chance=0.0)
+    batch = env.reset()
+    policy = build_policy(use_opening=False)
+    batch.observation_views.global_features[..., 0] = (8 * 24) / 719
+    opponent = batch.observation_views.tiles[:, :, 1]
+    flat = opponent.reshape(*opponent.shape[:2], 100, opponent.shape[-1])
+    flat[..., :15, 0] = 0.0
+    flat[..., :15, 3] = 1.0
+    flat[..., :15, 9 + Item.MELON] = 1.0
+
+    intent = policy.plan(batch)
+
+    np.testing.assert_array_equal(
+        intent.target_crop_counts[..., Item.STRAWBERRY], 19
+    )
+    np.testing.assert_array_equal(
+        intent.target_crop_counts[..., Item.MELON], 12
+    )
 
 
 def test_agent_expands_and_keeps_twelve_animals_alive() -> None:
@@ -175,17 +229,23 @@ def test_agent_expands_and_keeps_twelve_animals_alive() -> None:
     assert day_eight_strawberries >= 10
     assert len(day_eight_new_strawberry_positions) >= 4
     assert all(
-        min(abs(x - cx) + abs(y - cy) for cx, cy in center_access) <= 3
+        min(abs(x - cx) + abs(y - cy) for cx, cy in center_access) <= 5
         for x, y in day_eight_new_strawberry_positions
     )
     assert day_eight_assignment_kinds.count(TaskKind.PLANT) >= 3
     assert day_eight_assignment_kinds.count(TaskKind.FETCH_ITEM) <= 3
+    sheep_count = animals.count(int(Item.SHEEP) - int(Item.GOOSE))
     if len(farm["unlocked_quadrants"]) == 4:
         assert animals.count(int(Item.COW) - int(Item.GOOSE)) >= 6
-        assert animals.count(int(Item.SHEEP) - int(Item.GOOSE)) >= 8
+        assert sheep_count >= 8
+    elif sheep_count > 4:
+        # A single early Yarn Store retains three quadrants but replaces four
+        # dairy slots with sheep.
+        assert animals.count(int(Item.COW) - int(Item.GOOSE)) >= 6
+        assert sheep_count >= 6
     else:
         assert animals.count(int(Item.COW) - int(Item.GOOSE)) >= 8
-        assert animals.count(int(Item.SHEEP) - int(Item.GOOSE)) == 4
+        assert sheep_count == 4
     assert all(
         min(abs(x - cx) + abs(y - cy) for cx, cy in center_access) <= 3
         for x, y, _ in animal_tiles

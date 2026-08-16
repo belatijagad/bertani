@@ -115,6 +115,17 @@ front-running directly in tensors. Its fixed three-seed results match the
 submission-compatible Python runner exactly. Continue using `pit_agents.py`
 as the final Kaggle-format check; use `pit_v16_native.py` for broad searches.
 
+Compare daily rule-agent state, inventory, purchases, sales, and unit actions
+against all downloaded leaderboard replays with:
+
+```bash
+uv run python scripts/analyze_replay_gap.py
+```
+
+The compact report is written to `outputs/replay-gap.json`. It includes daily
+leader quartiles, the current rule median, and separate shop-configuration
+clusters so incompatible leaderboard branches are not reduced to one policy.
+
 Render one full local game and immediately open the standalone replay in the
 default browser with:
 

@@ -191,11 +191,38 @@ class IntentPlanner:
         shops = np.rint(
             batch.observation_views.global_features[..., 22:30] * 8
         ).astype(np.int64)
-        yarn_heavy = (features.day >= 12) & (shops[..., 7] >= 2)
+        # The leader commits to Yarn only when it appears among the first four
+        # shop draws. Later Yarn unlocks do not rebuild an established dairy
+        # farm. Sheep count latches the branch after that decision point.
+        early_yarn = (
+            ((features.day <= 12) & (shops[..., 7] >= 1))
+            | (features.animal_counts[..., 2] > 4)
+        )
+        early_double_yarn = (
+            ((features.day <= 12) & (shops[..., 7] >= 2))
+            | (features.animal_counts[..., 2] > 8)
+        )
+        opponent_tiles = batch.observation_views.tiles[:, :, 1]
+        opponent_crops = np.rint(
+            opponent_tiles[..., 9:14].sum(axis=(2, 3))
+        ).astype(np.int64)
+        # The reference player uses two visibly different expansion books.
+        # A wheat/livestock-heavy rival is answered with a 20-Melon cash
+        # cohort.  Against another Melon/dairy opening it keeps only twelve
+        # Melons and turns the second field into Strawberry earlier.  Crop
+        # counts make this decision causal and seat-independent; opponent cash
+        # happened to correlate with it in the downloaded games but is only a
+        # transient consequence of the rival's purchases.
+        opponent_field_heavy = (
+            (opponent_crops[..., Item.WHEAT] >= 6)
+            & (opponent_crops[..., Item.MELON] <= 8)
+        )
+        opponent_opening_known = opponent_crops.sum(axis=-1) >= 15
 
         # Daily workforce reconstructed from the replay median. Twelve hands
         # can maintain the stable board when crops are planted in cohorts.
         target_hands = np.full(shape, 12, dtype=np.int64)
+        target_hands[(features.day >= 14) & (features.day <= 21)] = 13
         target_hands[features.day < 6] = 5
         target_hands[features.day == 6] = 4
         # Seven hands match the amount of immediately actionable expansion
@@ -217,52 +244,96 @@ class IntentPlanner:
         # can complete the $1,000 land fund. Replenishment resumes afterward.
         wheat_reserve = np.where(features.day == 6, 2, wheat_reserve)
 
-        # Melon funds the opening, Strawberry is the midgame cash engine, and
-        # Wheat plus short-lived Carrot replace aging premium crops late.
+        # Daily targets describe the board we want at the *next* day boundary.
+        # The 313 downloaded leader replays use a second Melon cohort after the
+        # first land purchase, then finance the day-11 Wheat/Strawberry rebuild
+        # with that cohort's harvest. Replacing those tiles with Strawberry on
+        # day eight was the largest early cash divergence in our old policy.
         target_crop_counts = np.zeros((*shape, 5), dtype=np.int64)
         target_crop_counts[..., Item.WHEAT] = np.where(
             features.day < 3, 7, np.where(features.day < 8, 3, 7)
         )
-        target_crop_counts[..., Item.MELON] = 12
+        target_crop_counts[..., Item.WHEAT] = np.select(
+            (
+                features.day == 10,
+                features.day == 11,
+                features.day == 12,
+                features.day >= 13,
+            ),
+            (16, 19, 16, 19),
+            default=target_crop_counts[..., Item.WHEAT],
+        )
 
         target_crop_counts[..., Item.STRAWBERRY] = np.where(
-            (features.day >= 5) & (features.day <= 6),
-            4,
-            np.where(features.day == 7, 8, 0),
+            features.day >= 5, 4, 0
+        )
+        target_crop_counts[..., Item.STRAWBERRY] = np.select(
+            (
+                features.day == 6,
+                (features.day >= 7) & (features.day <= 10),
+                features.day == 11,
+                features.day >= 12,
+            ),
+            (7, 8, 31, 34),
+            default=target_crop_counts[..., Item.STRAWBERRY],
         )
         target_crop_counts[..., Item.STRAWBERRY] = np.where(
-            (features.day >= 8) & (features.day <= 11),
+            (features.day >= 8) & (features.day <= 10),
+            11,
+            target_crop_counts[..., Item.STRAWBERRY],
+        )
+
+        target_crop_counts[..., Item.MELON] = np.select(
+            (
+                features.day == 6,
+                features.day == 7,
+                features.day == 8,
+                features.day == 9,
+                (features.day >= 10) & (features.day <= 13),
+                features.day >= 14,
+            ),
+            (14, 18, 19, 20, 8, 0),
+            default=12,
+        )
+
+        mirror_opening = (
+            (features.day >= 6)
+            & (features.day <= 10)
+            & opponent_opening_known
+            & ~opponent_field_heavy
+        )
+        target_crop_counts[..., Item.MELON] = np.where(
+            mirror_opening, 12, target_crop_counts[..., Item.MELON]
+        )
+        target_crop_counts[..., Item.STRAWBERRY] = np.where(
+            mirror_opening & (features.day >= 8),
             19,
             target_crop_counts[..., Item.STRAWBERRY],
         )
 
-        day_eleven = features.day == 11
-        target_crop_counts[..., Item.WHEAT] = np.where(
-            day_eleven, 19, target_crop_counts[..., Item.WHEAT]
-        )
+        # One early Yarn Store trades the remaining Melon cohort and four cows
+        # for a compact 6-cow/8-sheep, 42-Strawberry board. Two early Yarn
+        # Stores retain eight Melons and buy the fourth quadrant for Wheat and
+        # four additional sheep.
+        yarn_rebuild = early_yarn & (features.day >= 11)
+        single_yarn = yarn_rebuild & ~early_double_yarn
         target_crop_counts[..., Item.STRAWBERRY] = np.where(
-            day_eleven, 35, target_crop_counts[..., Item.STRAWBERRY]
-        )
-        day_twelve = features.day == 12
-        target_crop_counts[..., Item.WHEAT] = np.where(
-            day_twelve, 19, target_crop_counts[..., Item.WHEAT]
-        )
-        target_crop_counts[..., Item.STRAWBERRY] = np.where(
-            day_twelve, 40, target_crop_counts[..., Item.STRAWBERRY]
+            single_yarn,
+            np.where(features.day == 11, 34, 42),
+            target_crop_counts[..., Item.STRAWBERRY],
         )
         target_crop_counts[..., Item.MELON] = np.where(
-            features.day >= 10, 0, target_crop_counts[..., Item.MELON]
-        )
-
-        stable = (features.day >= 13) & (features.day <= 21)
-        target_crop_counts[..., Item.WHEAT] = np.where(
-            stable, 19, target_crop_counts[..., Item.WHEAT]
+            single_yarn, 0, target_crop_counts[..., Item.MELON]
         )
         target_crop_counts[..., Item.STRAWBERRY] = np.where(
-            stable, 42, target_crop_counts[..., Item.STRAWBERRY]
+            yarn_rebuild & early_double_yarn,
+            34,
+            target_crop_counts[..., Item.STRAWBERRY],
         )
         target_crop_counts[..., Item.MELON] = np.where(
-            stable, 0, target_crop_counts[..., Item.MELON]
+            yarn_rebuild & early_double_yarn,
+            8,
+            target_crop_counts[..., Item.MELON],
         )
 
         late = (features.day >= 22) & (features.day < liquidation_start)
@@ -285,10 +356,10 @@ class IntentPlanner:
             late, 0, target_crop_counts[..., Item.MELON]
         )
 
-        # Four-field Yarn Store games retain 42 Strawberry and use the extra
-        # productive acreage primarily for Wheat and Sheep.
+        # Four-field double-Yarn games use the extra acreage primarily for
+        # Wheat and Sheep.
         target_crop_counts[..., Item.WHEAT] = np.where(
-            yarn_heavy & (features.day < 22),
+            early_double_yarn & (features.day >= 11) & (features.day < 22),
             26,
             target_crop_counts[..., Item.WHEAT],
         )
@@ -315,11 +386,17 @@ class IntentPlanner:
             (4, 3),
             default=2,
         )
+        yarn_livestock = early_yarn & (features.day >= 9)
         target_animal_counts[..., 1] = np.where(
-            yarn_heavy, 6, target_animal_counts[..., 1]
+            yarn_livestock, 6, target_animal_counts[..., 1]
         )
         target_animal_counts[..., 2] = np.where(
-            yarn_heavy, 12, target_animal_counts[..., 2]
+            yarn_livestock, 8, target_animal_counts[..., 2]
+        )
+        target_animal_counts[..., 2] = np.where(
+            early_double_yarn & (features.day >= 11),
+            12,
+            target_animal_counts[..., 2],
         )
         target_crop_counts[features.day >= total_days - 2] = 0
         target_crop_counts[phase == RulePhase.LIQUIDATION] = 0
@@ -434,6 +511,7 @@ class MaintenanceTaskRule:
         self.episode_days = max(
             1, (episode_steps + turns_per_day - 1) // turns_per_day
         )
+        self.last_step = max(1, episode_steps - 1)
 
     def propose(
         self,
@@ -450,6 +528,10 @@ class MaintenanceTaskRule:
         consecutive_missed = tiles[..., 17] * 2.0
         harvestable = tiles[..., 23] > 0.5
         crop_age = np.rint(tiles[..., 14] * self.episode_days).astype(np.int16)
+        step = np.rint(
+            batch.observation_views.global_features[..., 0] * self.last_step
+        ).astype(np.int64)
+        day = step // self.turns_per_day
         crop_channels = tiles[..., 9:14]
         # One-time crops are worth waiting for until their maximum-yield day.
         # Ongoing crops and animal products should be collected as soon as held.
@@ -541,7 +623,7 @@ class MaintenanceTaskRule:
         tasks.propose_tiles(
             TaskKind.HARVEST,
             harvest_now & animals,
-            110.0,
+            np.where((day == 6)[..., None, None], 145.0, 110.0),
             work_role=WorkRole.LIVESTOCK,
         )
         feed_priority = 120.0 + 30.0 * consecutive_missed
@@ -721,9 +803,8 @@ class ProductionTaskRule:
         ).astype(np.int64)
         hour = step % self.turns_per_day
         day = step // self.turns_per_day
-        # A plant starts with one missed watering day.  Leave enough turns for
-        # a worker to water it before end-of-day refresh instead of creating a
-        # weed at hour 23.
+        # A plant starts with one missed watering day. Leave enough turns for a
+        # worker to water it before the end-of-day refresh.
         safe_to_plant = hour < self.turns_per_day - 2
         empty = (
             (tiles[..., 0] > 0.5)
@@ -731,7 +812,7 @@ class ProductionTaskRule:
             & safe_to_plant[..., None, None]
         )
         shops = np.rint(views.global_features[..., 22:30] * 8).astype(np.int64)
-        reserved_pasture_count = np.where(shops[..., 7] >= 2, 18, 14)
+        reserved_pasture_count = np.maximum(14, target_pastures)
         reserved_pastures = (
             (pasture_rank >= 0)[None, None]
             & (pasture_rank[None, None] < reserved_pasture_count[..., None, None])
@@ -875,7 +956,11 @@ class ProductionTaskRule:
             ...,
             (Item.STRAWBERRY, Item.MELON, Item.MILK, Item.WOOL),
         ].sum(axis=(-1, -2)) > 0
-        deposit_priority = np.where(premium_carried, 112.0, 60.0)
+        deposit_priority = np.where(
+            premium_carried,
+            np.where(day == 6, 145.0, 112.0),
+            60.0,
+        )
         half = tasks.board_size // 2
         tasks.set_global(
             1,
@@ -1105,7 +1190,7 @@ class EconomyMarketRule:
         yarn_expansion = (
             (day >= 12)
             & (unlocked == 3)
-            & (shops[..., 7] >= 2)
+            & (intent.target_animal_counts[..., 2] >= 12)
             & (money >= 4_000)
         )
         land_buy = active & (
@@ -1152,7 +1237,15 @@ class EconomyMarketRule:
             (day < 6) | (unlocked >= 2) | land_buy
         )
         land_cost = np.choose(np.minimum(unlocked, 3), (0, 1_000, 2_000, 4_000))
-        animal_cash_reserve = np.where(day < 6, 0, 200)
+        # Sheep expansion is more expensive to maintain than its purchase
+        # price suggests. Preserve a feed-and-seed buffer in Yarn branches;
+        # otherwise seat-order price differences can spend the bank down to a
+        # few coins and cascade into every animal escaping.
+        animal_cash_reserve = np.where(
+            intent.target_animal_counts[..., 2] >= 8,
+            800,
+            np.where(day < 6, 0, 200),
+        )
         budget = np.maximum(
             0, money - animal_cash_reserve - land_buy * land_cost
         ).astype(np.int64)
@@ -1198,16 +1291,7 @@ class EconomyMarketRule:
         replacement_seeds = (
             crop_channels & (crop_age[..., None] >= replacement_ages)
         ).sum(axis=(2, 3), dtype=np.int64)
-        # Buy part of tomorrow's Strawberry cohort on expansion day. Those
-        # seeds remain private stock until the day-eight production target
-        # activates, so the newly hired crew can split immediately instead of
-        # waiting for several four-seed market batches.
         market_crop_targets = intent.target_crop_counts.copy()
-        market_crop_targets[..., Item.STRAWBERRY] = np.where(
-            day == 7,
-            np.maximum(market_crop_targets[..., Item.STRAWBERRY], 12),
-            market_crop_targets[..., Item.STRAWBERRY],
-        )
         total_missing = np.maximum(
             0,
             market_crop_targets.sum(axis=-1)
