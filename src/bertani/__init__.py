@@ -30,6 +30,10 @@ from .tasks import (
     TaskKind,
     TaskRule,
     TaskScheduler,
+    WorkforcePlan,
+    WorkforcePlanner,
+    WorkRole,
+    WorkZone,
 )
 
 __all__ = [
@@ -54,6 +58,10 @@ __all__ = [
     "TaskKind",
     "TaskRule",
     "TaskScheduler",
+    "WorkforcePlan",
+    "WorkforcePlanner",
+    "WorkRole",
+    "WorkZone",
     "UnitOp",
     "VecEnv",
     "VectorRulePolicy",

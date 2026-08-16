@@ -39,6 +39,39 @@ class TaskKind(IntEnum):
     DEPOSIT_INVENTORY = 13
 
 
+class WorkRole(IntEnum):
+    """Soft worker specialization used by the task scheduler."""
+
+    ANY = 0
+    LOGISTICS = 1
+    LIVESTOCK = 2
+    FIELD = 3
+
+
+class WorkZone(IntEnum):
+    """Preferred board region for field workers."""
+
+    ANY = -1
+    NW = 0
+    NE = 1
+    SW = 2
+    SE = 3
+
+
+@dataclass(frozen=True, slots=True)
+class WorkforcePlan:
+    """Per-unit soft role and territory preferences.
+
+    Preferences affect routing only among tasks in the same urgency band, so
+    every worker remains available for survival-critical work.
+    """
+
+    role: NDArray[np.int16]
+    zone: NDArray[np.int16]
+    role_bonus: float = 4.0
+    zone_bonus: float = 3.0
+
+
 @dataclass(frozen=True, slots=True)
 class TaskBatch:
     """Fixed-capacity task proposals for every environment and player.
@@ -61,6 +94,7 @@ class TaskBatch:
     required_item: NDArray[np.int16]
     required_count: NDArray[np.int64]
     exclusive: NDArray[np.bool_]
+    work_role: NDArray[np.int16]
     board_size: int
     tile_slots: int
 
@@ -91,6 +125,7 @@ class TaskBatch:
             required_item=np.full(shape, -1, dtype=np.int16),
             required_count=np.zeros(shape, dtype=np.int64),
             exclusive=np.ones(shape, dtype=np.bool_),
+            work_role=np.full(shape, WorkRole.ANY, dtype=np.int16),
             board_size=board_size,
             tile_slots=tile_slots,
         )
@@ -116,6 +151,7 @@ class TaskBatch:
         self.required_item.fill(-1)
         self.required_count.fill(0)
         self.exclusive.fill(True)
+        self.work_role.fill(WorkRole.ANY)
 
     def propose_tiles(
         self,
@@ -130,6 +166,7 @@ class TaskBatch:
         required_item: int = -1,
         required_count: int = 0,
         exclusive: bool = True,
+        work_role: WorkRole = WorkRole.ANY,
     ) -> None:
         """Propose one task per matching tile, replacing lower priorities."""
 
@@ -152,6 +189,7 @@ class TaskBatch:
         self.required_item[..., : self.tile_slots][slots] = required_item
         self.required_count[..., : self.tile_slots][slots] = required_count
         self.exclusive[..., : self.tile_slots][slots] = exclusive
+        self.work_role[..., : self.tile_slots][slots] = work_role
 
     def set_global(
         self,
@@ -169,6 +207,7 @@ class TaskBatch:
         required_item: int = -1,
         required_count: int = 0,
         exclusive: bool = True,
+        work_role: WorkRole = WorkRole.ANY,
     ) -> None:
         """Set one named extra-slot task across a batch."""
 
@@ -189,6 +228,7 @@ class TaskBatch:
         self.required_item[..., slot] = required_item
         self.required_count[..., slot] = required_count
         self.exclusive[..., slot] = exclusive
+        self.work_role[..., slot] = np.where(active, work_role, WorkRole.ANY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,8 +251,20 @@ class TaskRule(Protocol):
         """Add or replace task proposals using task priorities."""
 
 
+class WorkforcePlanner(Protocol):
+    """Extension point for assigning soft roles and territories to units."""
+
+    def __call__(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+    ) -> WorkforcePlan:
+        """Return per-unit preferences for the current scheduling turn."""
+
+
 class TaskScheduler:
-    """Assign urgency tiers using minimum-distance unit/task pairs."""
+    """Assign urgency bands using minimum-distance unit/task pairs."""
 
     def __init__(self, board_size: int, shed_capacity: int = 100) -> None:
         self.board_size = board_size
@@ -220,7 +272,12 @@ class TaskScheduler:
         self._shape: tuple[int, int, int] | None = None
         self._assignments: TaskAssignments | None = None
 
-    def assign(self, batch: Batch, tasks: TaskBatch) -> TaskAssignments:
+    def assign(
+        self,
+        batch: Batch,
+        tasks: TaskBatch,
+        workforce: WorkforcePlan | None = None,
+    ) -> TaskAssignments:
         n, players, unit_count = batch.active_units.shape
         shape = (n, players, unit_count)
         if self._assignments is None or self._shape != shape:
@@ -240,6 +297,24 @@ class TaskScheduler:
         inventories = np.rint(units[..., 5:17] * self.shed_capacity).astype(
             np.int64
         )
+        if workforce is None:
+            unit_role = np.full(shape, WorkRole.ANY, dtype=np.int16)
+            unit_zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
+            role_bonus = 0.0
+            zone_bonus = 0.0
+        else:
+            if workforce.role.shape != shape or workforce.zone.shape != shape:
+                raise ValueError("workforce plan must match active unit shape")
+            unit_role = np.ascontiguousarray(workforce.role, dtype=np.int16)
+            unit_zone = np.ascontiguousarray(workforce.zone, dtype=np.int16)
+            role_bonus = workforce.role_bonus
+            zone_bonus = workforce.zone_bonus
+
+        half = self.board_size // 2
+        task_zone = (
+            (tasks.target_y >= half).astype(np.int16) * 2
+            + (tasks.target_x >= half).astype(np.int16)
+        )
 
         if _native_schedule_tasks is not None:
             _native_schedule_tasks(
@@ -255,6 +330,13 @@ class TaskScheduler:
                 tasks.required_item,
                 tasks.required_count,
                 tasks.kind,
+                tasks.work_role,
+                unit_role,
+                unit_zone,
+                task_zone,
+                role_bonus,
+                zone_bonus,
+                tasks.board_size,
                 assignments.task_index,
                 assignments.score,
             )
@@ -262,8 +344,19 @@ class TaskScheduler:
             distance = np.abs(unit_x[..., None] - tasks.target_x[..., None, :])
             distance += np.abs(unit_y[..., None] - tasks.target_y[..., None, :])
             scores = (
-                tasks.priority[..., None, :] * 1_000.0 - distance
+                tasks.priority[..., None, :] - distance
             ).astype(np.float32, copy=False)
+            role_match = (
+                (unit_role[..., None] != WorkRole.ANY)
+                & (unit_role[..., None] == tasks.work_role[..., None, :])
+            )
+            field_task = tasks.work_role == WorkRole.FIELD
+            zone_match = (
+                (unit_zone[..., None] != WorkZone.ANY)
+                & field_task[..., None, :]
+                & (unit_zone[..., None] == task_zone[..., None, :])
+            )
+            scores += role_match * role_bonus + zone_match * zone_bonus
             eligible = batch.active_units[..., None] & tasks.active[..., None, :]
             for item_index in range(inventories.shape[-1]):
                 required = tasks.required_item == item_index
@@ -278,7 +371,78 @@ class TaskScheduler:
             eligible &= ~deposit[..., None, :] | carrying_anything[..., None]
             scores[~eligible] = -np.inf
             self._assign_python(batch, tasks, scores, assignments)
+            self._prefer_unclaimed_local_tasks(
+                batch,
+                tasks,
+                assignments,
+                unit_x,
+                unit_y,
+                inventories,
+            )
         return assignments
+
+    @staticmethod
+    def _prefer_unclaimed_local_tasks(
+        batch: Batch,
+        tasks: TaskBatch,
+        assignments: TaskAssignments,
+        unit_x: NDArray[np.int16],
+        unit_y: NDArray[np.int16],
+        inventories: NDArray[np.int64],
+        priority_slack: float = 5.0,
+    ) -> None:
+        """Do useful work underfoot when no other unit owns that tile task."""
+
+        n, players, _ = batch.active_units.shape
+        for environment in range(n):
+            for player in range(players):
+                active_units = np.flatnonzero(
+                    batch.active_units[environment, player]
+                )
+                claimed = {
+                    int(task)
+                    for task in assignments.task_index[environment, player]
+                    if task >= 0
+                }
+                for unit in active_units:
+                    local = (
+                        int(unit_y[environment, player, unit])
+                        * tasks.board_size
+                        + int(unit_x[environment, player, unit])
+                    )
+                    if (
+                        local >= tasks.tile_slots
+                        or not tasks.active[environment, player, local]
+                        or local in claimed
+                    ):
+                        continue
+                    required = int(
+                        tasks.required_item[environment, player, local]
+                    )
+                    if required >= 0 and inventories[
+                        environment, player, unit, required
+                    ] < tasks.required_count[environment, player, local]:
+                        continue
+                    current = int(
+                        assignments.task_index[environment, player, unit]
+                    )
+                    current_priority = (
+                        float(tasks.priority[environment, player, current])
+                        if current >= 0
+                        else -np.inf
+                    )
+                    local_priority = float(
+                        tasks.priority[environment, player, local]
+                    )
+                    if local_priority + priority_slack < current_priority:
+                        continue
+                    if current >= 0:
+                        claimed.discard(current)
+                    assignments.task_index[environment, player, unit] = local
+                    assignments.score[environment, player, unit] = (
+                        local_priority * 1_000.0
+                    )
+                    claimed.add(local)
 
     @staticmethod
     def _assign_python(
@@ -294,12 +458,13 @@ class TaskScheduler:
             for player in range(players):
                 available_units = set(np.flatnonzero(batch.active_units[environment, player]))
                 active_tasks = np.flatnonzero(tasks.active[environment, player])
-                priorities = np.unique(tasks.priority[environment, player, active_tasks])[::-1]
-                for priority in priorities:
+                urgency = np.floor(
+                    tasks.priority[environment, player, active_tasks] / 10.0
+                )
+                urgency_bands = np.unique(urgency)[::-1]
+                for urgency_band in urgency_bands:
                     tier_tasks = set(
-                        active_tasks[
-                            tasks.priority[environment, player, active_tasks] == priority
-                        ].tolist()
+                        active_tasks[urgency == urgency_band].tolist()
                     )
                     while available_units and tier_tasks:
                         candidates = np.asarray(sorted(available_units), dtype=np.int64)
@@ -444,4 +609,8 @@ __all__ = [
     "TaskKind",
     "TaskRule",
     "TaskScheduler",
+    "WorkforcePlan",
+    "WorkforcePlanner",
+    "WorkRole",
+    "WorkZone",
 ]

@@ -115,6 +115,17 @@ front-running directly in tensors. Its fixed three-seed results match the
 submission-compatible Python runner exactly. Continue using `pit_agents.py`
 as the final Kaggle-format check; use `pit_v16_native.py` for broad searches.
 
+Render one full local game and immediately open the standalone replay in the
+default browser with:
+
+```bash
+uv run python scripts/render_game.py --seed 11
+```
+
+Use `--rule-seat 1` to swap seats, `--opponent starter` to use a Kaggle built-in
+agent, or `--no-open` when generating a replay non-interactively. Replays are
+written under `outputs/replays/` by default.
+
 The preserved V16-RC5 baseline and its provenance are documented in
 [`baselines/v16_rc5/README.md`](baselines/v16_rc5/README.md).
 

@@ -24,6 +24,7 @@ from .tasks import (
     TaskExecutor,
     TaskRule,
     TaskScheduler,
+    WorkforcePlanner,
 )
 from .vec_env import Batch, Item, MarketOp
 
@@ -157,6 +158,7 @@ class VectorRulePolicy:
         opening_controller: OpeningController | None = None,
         task_rules: tuple[TaskRule, ...] | None = None,
         market_rules: tuple[MarketRule, ...] | None = None,
+        workforce_planner: WorkforcePlanner | None = None,
     ) -> None:
         self.config = config or RuleConfig()
         self.intent_planner = intent_planner
@@ -164,6 +166,7 @@ class VectorRulePolicy:
         self.last_opening_diagnostics: OpeningDiagnostics | None = None
         self.task_rules = () if task_rules is None else task_rules
         self.market_rules = () if market_rules is None else market_rules
+        self.workforce_planner = workforce_planner
         self._task_scheduler: TaskScheduler | None = None
         self._task_executor: TaskExecutor | None = None
         self.last_tasks: TaskBatch | None = None
@@ -229,16 +232,21 @@ class VectorRulePolicy:
             rule.propose(batch, intent, tasks)
         assert self._task_scheduler is not None
         assert self._task_executor is not None
-        assignments = self._task_scheduler.assign(batch, tasks)
+        workforce = (
+            self.workforce_planner(batch, intent, tasks)
+            if self.workforce_planner is not None
+            else None
+        )
+        assignments = self._task_scheduler.assign(batch, tasks, workforce)
         self._task_executor.execute(
             batch, tasks, assignments, actions.unit_actions
         )
         self.last_tasks = tasks
         self.last_assignments = assignments
 
+        self._append_liquidation_sales(features, intent, self.last_market_plan)
         for rule in self.market_rules:
             rule.propose(batch, intent, self.last_market_plan)
-        self._append_liquidation_sales(features, intent, self.last_market_plan)
         if self.opening_controller is not None:
             self.last_opening_diagnostics = self.opening_controller.apply(
                 batch,

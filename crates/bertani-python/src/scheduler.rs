@@ -27,6 +27,13 @@ pub(crate) fn schedule_tasks<'py>(
     required_item: Bound<'py, PyArray3<i16>>,
     required_count: Bound<'py, PyArray3<i64>>,
     task_kind: Bound<'py, PyArray3<i16>>,
+    task_role: Bound<'py, PyArray3<i16>>,
+    unit_role: Bound<'py, PyArray3<i16>>,
+    unit_zone: Bound<'py, PyArray3<i16>>,
+    task_zone: Bound<'py, PyArray3<i16>>,
+    role_bonus: f32,
+    zone_bonus: f32,
+    board_size: usize,
     task_index: Bound<'py, PyArray3<i64>>,
     output_scores: Bound<'py, PyArray3<f32>>,
 ) -> PyResult<()> {
@@ -62,6 +69,10 @@ pub(crate) fn schedule_tasks<'py>(
             task_shape.as_slice(),
         ),
         ("task_kind", task_kind.shape(), task_shape.as_slice()),
+        ("task_role", task_role.shape(), task_shape.as_slice()),
+        ("unit_role", unit_role.shape(), unit_shape.as_slice()),
+        ("unit_zone", unit_zone.shape(), unit_shape.as_slice()),
+        ("task_zone", task_zone.shape(), task_shape.as_slice()),
         ("task_index", task_index.shape(), unit_shape.as_slice()),
         (
             "output_scores",
@@ -82,6 +93,11 @@ pub(crate) fn schedule_tasks<'py>(
             [environments, players, units, 12]
         )));
     }
+    if board_size == 0 || board_size.saturating_mul(board_size) > tasks {
+        return Err(PyValueError::new_err(
+            "board size does not fit inside the task slots",
+        ));
+    }
     for (name, contiguous) in [
         ("unit_x", unit_x.is_c_contiguous()),
         ("unit_y", unit_y.is_c_contiguous()),
@@ -95,6 +111,10 @@ pub(crate) fn schedule_tasks<'py>(
         ("required_item", required_item.is_c_contiguous()),
         ("required_count", required_count.is_c_contiguous()),
         ("task_kind", task_kind.is_c_contiguous()),
+        ("task_role", task_role.is_c_contiguous()),
+        ("unit_role", unit_role.is_c_contiguous()),
+        ("unit_zone", unit_zone.is_c_contiguous()),
+        ("task_zone", task_zone.is_c_contiguous()),
         ("task_index", task_index.is_c_contiguous()),
         ("output_scores", output_scores.is_c_contiguous()),
     ] {
@@ -117,6 +137,10 @@ pub(crate) fn schedule_tasks<'py>(
     let required_item_guard = required_item.try_readonly()?;
     let required_count_guard = required_count.try_readonly()?;
     let task_kind_guard = task_kind.try_readonly()?;
+    let task_role_guard = task_role.try_readonly()?;
+    let unit_role_guard = unit_role.try_readonly()?;
+    let unit_zone_guard = unit_zone.try_readonly()?;
+    let task_zone_guard = task_zone.try_readonly()?;
     let unit_x = unit_x_guard.as_slice()?;
     let unit_y = unit_y_guard.as_slice()?;
     let inventories = inventories_guard.as_slice()?;
@@ -129,6 +153,10 @@ pub(crate) fn schedule_tasks<'py>(
     let required_item = required_item_guard.as_slice()?;
     let required_count = required_count_guard.as_slice()?;
     let task_kind = task_kind_guard.as_slice()?;
+    let task_role = task_role_guard.as_slice()?;
+    let unit_role = unit_role_guard.as_slice()?;
+    let unit_zone = unit_zone_guard.as_slice()?;
+    let task_zone = task_zone_guard.as_slice()?;
     let mut task_index = task_index.try_readwrite()?;
     let mut output_scores = output_scores.try_readwrite()?;
     let task_index = task_index.as_slice_mut()?;
@@ -145,19 +173,20 @@ pub(crate) fn schedule_tasks<'py>(
         let mut ordered_tasks = (0..tasks)
             .filter(|&task| active_tasks[task_start + task])
             .collect::<Vec<_>>();
+        let urgency_band = |task: usize| (priorities[task_start + task] / 10.0).floor();
         ordered_tasks.sort_by(|&left, &right| {
-            priorities[task_start + right]
-                .partial_cmp(&priorities[task_start + left])
+            urgency_band(right)
+                .partial_cmp(&urgency_band(left))
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| left.cmp(&right))
         });
 
         let mut tier_start = 0;
         while tier_start < ordered_tasks.len() && available.iter().any(|&value| value) {
-            let priority = priorities[task_start + ordered_tasks[tier_start]];
+            let priority = urgency_band(ordered_tasks[tier_start]);
             let mut tier_end = tier_start + 1;
             while tier_end < ordered_tasks.len()
-                && priorities[task_start + ordered_tasks[tier_end]] == priority
+                && urgency_band(ordered_tasks[tier_end]) == priority
             {
                 tier_end += 1;
             }
@@ -198,7 +227,29 @@ pub(crate) fn schedule_tasks<'py>(
                         let distance = (unit_x[unit_start + unit] - target_x[task_start + task])
                             .abs()
                             + (unit_y[unit_start + unit] - target_y[task_start + task]).abs();
-                        let score = priorities[task_start + task] * 1_000.0 - f32::from(distance);
+                        let preferred_role = unit_role[unit_start + unit];
+                        let assigned_role = task_role[task_start + task];
+                        let role_affinity =
+                            if preferred_role != 0 && preferred_role == assigned_role {
+                                role_bonus
+                            } else {
+                                0.0
+                            };
+                        // FIELD is role 3. Territory preference is deliberately
+                        // ignored for logistics and livestock tasks near the
+                        // shed so those routes can use any suitable worker.
+                        let preferred_zone = unit_zone[unit_start + unit];
+                        let zone_affinity = if assigned_role == 3
+                            && preferred_zone >= 0
+                            && preferred_zone == task_zone[task_start + task]
+                        {
+                            zone_bonus
+                        } else {
+                            0.0
+                        };
+                        let score = priorities[task_start + task] - f32::from(distance)
+                            + role_affinity
+                            + zone_affinity;
                         if score.is_finite()
                             && best.is_none_or(|(_, _, best_score)| score > best_score)
                         {
@@ -222,6 +273,63 @@ pub(crate) fn schedule_tasks<'py>(
                 }
             }
             tier_start = tier_end;
+        }
+
+        // A worker already standing on a nearly-as-urgent tile should finish
+        // it before crossing the board, provided no other worker owns it.
+        let mut claimed = vec![false; tasks];
+        for unit in 0..units {
+            if let Ok(task) = usize::try_from(task_index[unit_start + unit]) {
+                if task < tasks {
+                    claimed[task] = true;
+                }
+            }
+        }
+        for unit in 0..units {
+            if !active_units[unit_start + unit] {
+                continue;
+            }
+            let Ok(x) = usize::try_from(unit_x[unit_start + unit]) else {
+                continue;
+            };
+            let Ok(y) = usize::try_from(unit_y[unit_start + unit]) else {
+                continue;
+            };
+            let Some(local) = y.checked_mul(board_size).and_then(|row| row.checked_add(x)) else {
+                continue;
+            };
+            if local >= board_size * board_size
+                || !active_tasks[task_start + local]
+                || claimed[local]
+            {
+                continue;
+            }
+            let required = required_item[task_start + local];
+            if required >= 0 {
+                let item = usize::try_from(required)
+                    .map_err(|_| PyValueError::new_err("required item is outside inventory"))?;
+                if item >= 12
+                    || inventories[inventory_start + unit * 12 + item]
+                        < required_count[task_start + local]
+                {
+                    continue;
+                }
+            }
+            let current = usize::try_from(task_index[unit_start + unit]).ok();
+            let current_priority = current
+                .filter(|&task| task < tasks)
+                .map_or(f32::NEG_INFINITY, |task| priorities[task_start + task]);
+            let local_priority = priorities[task_start + local];
+            if local_priority + 5.0 < current_priority {
+                continue;
+            }
+            if let Some(current) = current.filter(|&task| task < tasks) {
+                claimed[current] = false;
+            }
+            task_index[unit_start + unit] = i64::try_from(local)
+                .map_err(|_| PyValueError::new_err("task index exceeds i64"))?;
+            output_scores[unit_start + unit] = local_priority * 1_000.0;
+            claimed[local] = true;
         }
     }
     Ok(())

@@ -21,6 +21,7 @@ ITEM_NAMES = tuple(item.name for item in Item)
 CROP_NAMES = ITEM_NAMES[:5]
 ANIMAL_NAMES = ITEM_NAMES[9:12]
 PRODUCT_BASE_PRICES = (25, 35, 60, 120, 250, 50, 160, 200, 100)
+PRODUCT_THRESHOLDS = (400, 450, 200, 100, 300, 332, 122, 105, 200)
 QUADRANTS = ("NW", "NE", "SW", "SE")
 SHOP_NAMES = (
     "BAKERY",
@@ -138,9 +139,16 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
 
     for player_axis in range(2):
         global_features[0, player_axis, 0] = step / max(1, config.episode_steps - 1)
-    market_prices = _get(_get(obs, "market", {}), "prices", {}) or {}
-    for product, base in zip(ITEM_NAMES[:9], PRODUCT_BASE_PRICES):
-        global_features[0, seat, 5 + 2 * ITEM_NAMES[:9].index(product)] = float(
+    market = _get(obs, "market", {}) or {}
+    market_prices = _get(market, "prices", {}) or {}
+    market_inventory = _get(market, "inventory", {}) or {}
+    for index, (product, base, threshold) in enumerate(
+        zip(ITEM_NAMES[:9], PRODUCT_BASE_PRICES, PRODUCT_THRESHOLDS)
+    ):
+        global_features[0, seat, 4 + 2 * index] = (
+            float(_get(market_inventory, product, 10_000)) - 10_000
+        ) / threshold
+        global_features[0, seat, 5 + 2 * index] = float(
             _get(market_prices, product, base)
         ) / base
     unlocked_shops = list(

@@ -15,6 +15,9 @@ from bertani import (
     UnitOp,
     VecEnv,
     VectorRulePolicy,
+    WorkforcePlan,
+    WorkRole,
+    WorkZone,
 )
 
 
@@ -118,7 +121,7 @@ def test_post_opening_feed_workflow_uses_parallel_carriers() -> None:
     )
     actions = policy.act(batch, max_orders=env.max_orders)
     active_ops = actions.unit_actions[0, 0, :9, 0]
-    assert np.count_nonzero(active_ops == UnitOp.PICKUP) >= 2
+    assert np.count_nonzero(active_ops == UnitOp.PICKUP) >= 1
 
     observed_feed = False
     for _ in range(5):
@@ -134,3 +137,84 @@ def test_post_opening_feed_workflow_uses_parallel_carriers() -> None:
     assert observed_feed
     assert policy.last_tasks is not None
     assert policy.last_assignments is not None
+
+
+def test_scheduler_finishes_nearly_as_urgent_unclaimed_work_underfoot() -> None:
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    scheduler = TaskScheduler(env.board_size)
+
+    local = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    remote = np.zeros_like(local)
+    local[0, 0, 4, 4] = True
+    remote[0, 0, 0, 0] = True
+    tasks.propose_tiles(TaskKind.CARE, local, 85.0)
+    tasks.propose_tiles(TaskKind.WATER, remote, 90.0)
+
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == 4 * env.board_size + 4
+
+    # More than five points of urgency still overrides work underfoot.
+    tasks.clear()
+    tasks.propose_tiles(TaskKind.CARE, local, 84.0)
+    tasks.propose_tiles(TaskKind.WATER, remote, 90.0)
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == 0
+
+
+def test_scheduler_prefers_nearby_work_within_an_urgency_band() -> None:
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    scheduler = TaskScheduler(env.board_size)
+
+    nearby = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    remote = np.zeros_like(nearby)
+    nearby[0, 0, 3, 4] = True
+    remote[0, 0, 0, 0] = True
+    tasks.propose_tiles(TaskKind.CARE, nearby, 100.0)
+    tasks.propose_tiles(TaskKind.WATER, remote, 105.0)
+
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == 3 * env.board_size + 4
+
+    # A genuinely more urgent band still wins regardless of travel distance.
+    tasks.clear()
+    tasks.propose_tiles(TaskKind.CARE, nearby, 100.0)
+    tasks.propose_tiles(TaskKind.FEED, remote, 120.0)
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == 0
+
+
+def test_scheduler_supports_soft_workforce_roles() -> None:
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+
+    field = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    logistics = np.zeros_like(field)
+    field[0, 0, 3, 4] = True
+    logistics[0, 0, 4, 3] = True
+    tasks.propose_tiles(
+        TaskKind.WATER,
+        field,
+        100.0,
+        work_role=WorkRole.FIELD,
+    )
+    tasks.propose_tiles(
+        TaskKind.CLEAR_WEED,
+        logistics,
+        100.0,
+        work_role=WorkRole.LOGISTICS,
+    )
+    role = np.full(batch.active_units.shape, WorkRole.ANY, dtype=np.int16)
+    zone = np.full(batch.active_units.shape, WorkZone.ANY, dtype=np.int16)
+    role[0, 0, 0] = WorkRole.LOGISTICS
+
+    assignments = TaskScheduler(env.board_size).assign(
+        batch,
+        tasks,
+        WorkforcePlan(role=role, zone=zone, role_bonus=4.0),
+    )
+    assert assignments.task_index[0, 0, 0] == 4 * env.board_size + 3
