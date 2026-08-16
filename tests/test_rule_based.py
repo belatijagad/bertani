@@ -19,7 +19,7 @@ from bertani import (
 def test_rule_features_and_opening_intent_are_batched() -> None:
     env = VecEnv(4, seed=17, weed_spawn_chance=0.0)
     batch = env.reset()
-    policy = VectorRulePolicy()
+    policy = VectorRulePolicy(use_opening=False)
 
     features = policy.extract_features(batch)
     intent = policy.plan(batch)
@@ -50,7 +50,7 @@ def test_masked_executor_waters_a_plant_on_the_current_tile() -> None:
     units[:, 0, 0] = (UnitOp.PLANT, Item.CARROT, 0)
     batch = env.step(unit_actions=units)
 
-    policy = VectorRulePolicy()
+    policy = VectorRulePolicy(use_opening=False)
     actions = policy.act(batch, max_orders=env.max_orders)
 
     np.testing.assert_array_equal(actions.unit_actions[:, 0, 0, 0], UnitOp.WATER)
@@ -71,7 +71,7 @@ def test_action_buffers_are_reused_and_liquidation_serializes_sales() -> None:
     lengths[0, 0] = 1
     batch = env.step(market_actions=market, market_lengths=lengths)
 
-    policy = VectorRulePolicy(RuleConfig(liquidation_days=30))
+    policy = VectorRulePolicy(RuleConfig(liquidation_days=30), use_opening=False)
     first = policy.act(batch, max_orders=env.max_orders)
     second = policy.act(batch, max_orders=env.max_orders)
 

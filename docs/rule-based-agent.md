@@ -22,10 +22,21 @@ VecEnv Batch
 crop/animal targets, and liquidation flags. The default rules identify the
 observed three-day opening, a midgame, and the final liquidation window. A
 custom callable passed as `intent_planner=` can replace those strategic rules
-without replacing action legality and serialization.
+without replacing action legality and serialization. Pass `use_opening=False`
+to train or evaluate a planner from the initial state without the opening book.
 
-The initial executor is intentionally conservative. It performs useful actions
-available on each unit's current tile, in this priority order:
+The opening controller owns steps 0–71 (days 0–2). Its nominal action book is
+the sequence observed in submission `55463512`, but it inspects the planned
+pasture tile `(2, 4)` during the final six turns. If that tile contains a weed,
+the farmer digs it and builds the pasture on the following turn. The controller
+therefore reconverges to the intended opening position instead of blindly
+advancing the tape. `last_opening_diagnostics` exposes per-seat `active`,
+`finished`, `recovering`, and `invalid_nominal_action` arrays after every
+`act()` call.
+
+Outside the opening, the initial executor is intentionally conservative. It
+performs useful actions available on each unit's current tile, in this priority
+order:
 
 1. harvest;
 2. feed;
@@ -45,7 +56,7 @@ Use it with the vector environment:
 from bertani import VecEnv, VectorRulePolicy
 
 env = VecEnv(num_envs=256, seed=11)
-policy = VectorRulePolicy()
+policy = VectorRulePolicy()  # Opening controller enabled by default.
 batch = env.reset()
 
 while True:
@@ -65,7 +76,6 @@ actions they need to retain.
 
 The scaffold is not yet a competitive baseline. The next layers are:
 
-- a state-based opening controller reproducing the observed day 0–2 position;
 - a task map for watering, feeding, care, harvesting, weeds, and structures;
 - deterministic unit-to-task assignment and shortest-path movement;
 - inventory logistics around the shed;

@@ -1,5 +1,11 @@
 """Fast Rust tooling for the Kaggriculture reinforcement-learning competition."""
 
+from .opening import (
+    OPENING_BOOK,
+    OpeningController,
+    OpeningDiagnostics,
+    OpeningTurn,
+)
 from .vec_env import (
     Batch,
     Item,
@@ -24,6 +30,10 @@ __all__ = [
     "MarketOp",
     "MaskViews",
     "ObservationViews",
+    "OPENING_BOOK",
+    "OpeningController",
+    "OpeningDiagnostics",
+    "OpeningTurn",
     "RuleActions",
     "RuleConfig",
     "RuleFeatures",

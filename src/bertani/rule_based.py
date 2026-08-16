@@ -16,6 +16,7 @@ from enum import IntEnum
 import numpy as np
 from numpy.typing import NDArray
 
+from .opening import OpeningController, OpeningDiagnostics
 from .vec_env import Batch, Item, MarketOp, UnitOp
 
 
@@ -133,9 +134,14 @@ class VectorRulePolicy:
         self,
         config: RuleConfig | None = None,
         intent_planner: Callable[[Batch], StrategicIntent] | None = None,
+        use_opening: bool = True,
     ) -> None:
         self.config = config or RuleConfig()
         self.intent_planner = intent_planner
+        self.opening_controller = (
+            OpeningController(self.config.episode_steps) if use_opening else None
+        )
+        self.last_opening_diagnostics: OpeningDiagnostics | None = None
         self._shape: tuple[int, int, int, int] | None = None
         self._actions: RuleActions | None = None
 
@@ -251,6 +257,15 @@ class VectorRulePolicy:
         actions.unit_actions[..., 0] = chosen
 
         self._append_liquidation_sales(features, intent, actions)
+        if self.opening_controller is not None:
+            self.last_opening_diagnostics = self.opening_controller.apply(
+                batch,
+                actions.unit_actions,
+                actions.market_actions,
+                actions.market_lengths,
+            )
+        else:
+            self.last_opening_diagnostics = None
         return actions
 
     def _action_buffers(self, batch: Batch, max_orders: int) -> RuleActions:
