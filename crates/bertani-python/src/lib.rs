@@ -2,6 +2,7 @@
 
 mod action;
 mod encoding;
+mod scheduler;
 mod snapshot;
 mod vec_env;
 
@@ -11,6 +12,9 @@ use pyo3::prelude::*;
 mod _rust {
     #[pymodule_export]
     use super::vec_env::NativeVecEnv;
+
+    #[pymodule_export]
+    use super::scheduler::schedule_tasks;
 
     #[pymodule_export]
     const UNIT_ACTION_COUNT: usize = super::action::UNIT_ACTION_COUNT;

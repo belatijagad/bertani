@@ -100,6 +100,21 @@ uv run python scripts/pit_agents.py \
   --seeds 11 12 13
 ```
 
+Use the parity-checked native V16 harness for high-throughput rule development:
+
+```bash
+# Deterministic panel of 100 generated seeds, both seat orders (200 games).
+uv run python scripts/pit_v16_native.py --num-seeds 100 --seed-source 2026
+
+# A named regression panel.
+uv run python scripts/pit_v16_native.py --seeds 11 451781128 874717982
+```
+
+The native adapter reproduces V16's trace, weed recovery, and market
+front-running directly in tensors. Its fixed three-seed results match the
+submission-compatible Python runner exactly. Continue using `pit_agents.py`
+as the final Kaggle-format check; use `pit_v16_native.py` for broad searches.
+
 The preserved V16-RC5 baseline and its provenance are documented in
 [`baselines/v16_rc5/README.md`](baselines/v16_rc5/README.md).
 

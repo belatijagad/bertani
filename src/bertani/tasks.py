@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    from ._rust import schedule_tasks as _native_schedule_tasks
+except (ImportError, ModuleNotFoundError):
+    _native_schedule_tasks = None
+
 from .vec_env import Batch, Item, UnitOp
 
 if TYPE_CHECKING:
@@ -236,44 +241,69 @@ class TaskScheduler:
             np.int64
         )
 
-        # Task scoring is dense and batched. The final conflict resolution is a
-        # deliberately small ragged loop because active unit/task counts vary.
-        distance = np.abs(unit_x[..., None] - tasks.target_x[..., None, :])
-        distance += np.abs(unit_y[..., None] - tasks.target_y[..., None, :])
-        scores = tasks.priority[..., None, :] * 1_000.0 - distance
-        scores = scores.astype(np.float32, copy=False)
-        eligible = batch.active_units[..., None] & tasks.active[..., None, :]
-        for item in range(12):
-            required = tasks.required_item == item
-            if required.any():
-                enough = inventories[..., item, None] >= tasks.required_count[..., None, :]
-                eligible &= ~required[..., None, :] | enough
-        deposit = tasks.kind == TaskKind.DEPOSIT_INVENTORY
-        carrying_anything = inventories.sum(axis=-1) > 0
-        eligible &= ~deposit[..., None, :] | carrying_anything[..., None]
-        scores[~eligible] = -np.inf
+        if _native_schedule_tasks is not None:
+            _native_schedule_tasks(
+                unit_x,
+                unit_y,
+                inventories,
+                tasks.priority,
+                batch.active_units,
+                tasks.active,
+                tasks.exclusive,
+                tasks.target_x,
+                tasks.target_y,
+                tasks.required_item,
+                tasks.required_count,
+                tasks.kind,
+                assignments.task_index,
+                assignments.score,
+            )
+        else:
+            distance = np.abs(unit_x[..., None] - tasks.target_x[..., None, :])
+            distance += np.abs(unit_y[..., None] - tasks.target_y[..., None, :])
+            scores = (
+                tasks.priority[..., None, :] * 1_000.0 - distance
+            ).astype(np.float32, copy=False)
+            eligible = batch.active_units[..., None] & tasks.active[..., None, :]
+            for item_index in range(inventories.shape[-1]):
+                required = tasks.required_item == item_index
+                if required.any():
+                    enough = (
+                        inventories[..., item_index, None]
+                        >= tasks.required_count[..., None, :]
+                    )
+                    eligible &= ~required[..., None, :] | enough
+            deposit = tasks.kind == TaskKind.DEPOSIT_INVENTORY
+            carrying_anything = inventories.sum(axis=-1) > 0
+            eligible &= ~deposit[..., None, :] | carrying_anything[..., None]
+            scores[~eligible] = -np.inf
+            self._assign_python(batch, tasks, scores, assignments)
+        return assignments
 
+    @staticmethod
+    def _assign_python(
+        batch: Batch,
+        tasks: TaskBatch,
+        scores: NDArray[np.float32],
+        assignments: TaskAssignments,
+    ) -> None:
+        """Portable fallback used by submission archives without the extension."""
+
+        n, players, _ = batch.active_units.shape
         for environment in range(n):
             for player in range(players):
                 available_units = set(np.flatnonzero(batch.active_units[environment, player]))
                 active_tasks = np.flatnonzero(tasks.active[environment, player])
-                priorities = np.unique(
-                    tasks.priority[environment, player, active_tasks]
-                )[::-1]
+                priorities = np.unique(tasks.priority[environment, player, active_tasks])[::-1]
                 for priority in priorities:
                     tier_tasks = set(
                         active_tasks[
-                            tasks.priority[environment, player, active_tasks]
-                            == priority
+                            tasks.priority[environment, player, active_tasks] == priority
                         ].tolist()
                     )
                     while available_units and tier_tasks:
-                        candidates = np.asarray(
-                            sorted(available_units), dtype=np.int64
-                        )
-                        candidate_tasks = np.asarray(
-                            sorted(tier_tasks), dtype=np.int64
-                        )
+                        candidates = np.asarray(sorted(available_units), dtype=np.int64)
+                        candidate_tasks = np.asarray(sorted(tier_tasks), dtype=np.int64)
                         tier_scores = scores[environment, player][
                             np.ix_(candidates, candidate_tasks)
                         ]
@@ -281,9 +311,7 @@ class TaskScheduler:
                         best_score = float(tier_scores.flat[best_flat])
                         if not np.isfinite(best_score):
                             break
-                        unit_offset, task_offset = np.unravel_index(
-                            best_flat, tier_scores.shape
-                        )
+                        unit_offset, task_offset = np.unravel_index(best_flat, tier_scores.shape)
                         unit = int(candidates[unit_offset])
                         task = int(candidate_tasks[task_offset])
                         assignments.task_index[environment, player, unit] = task
@@ -291,7 +319,6 @@ class TaskScheduler:
                         available_units.remove(unit)
                         if tasks.exclusive[environment, player, task]:
                             tier_tasks.remove(task)
-        return assignments
 
 
 class TaskExecutor:
@@ -333,55 +360,69 @@ class TaskExecutor:
         scale = max(1, self.board_size - 1)
         unit_x = np.rint(units[..., 2] * scale).astype(np.int16)
         unit_y = np.rint(units[..., 3] * scale).astype(np.int16)
-        n, players, unit_count = batch.active_units.shape
+        assigned = assignments.task_index >= 0
+        safe_task = np.maximum(assignments.task_index, 0)
 
-        for environment in range(n):
-            for player in range(players):
-                for unit in range(unit_count):
-                    task_index = assignments.task_index[environment, player, unit]
-                    if task_index < 0:
-                        continue
-                    target_x = tasks.target_x[environment, player, task_index]
-                    target_y = tasks.target_y[environment, player, task_index]
-                    x = unit_x[environment, player, unit]
-                    y = unit_y[environment, player, unit]
-                    kind = TaskKind(tasks.kind[environment, player, task_index])
-                    if kind == TaskKind.DEPOSIT_INVENTORY:
-                        half = self.board_size // 2
-                        centers = (max(0, half - 1), half)
-                        if x in centers and y in centers:
-                            if batch.mask_views.unit_ops[
-                                environment, player, unit, UnitOp.DROP
-                            ]:
-                                unit_actions[environment, player, unit, 0] = UnitOp.DROP
-                            continue
-                        target_x = centers[0] if x <= centers[0] else centers[1]
-                        target_y = centers[0] if y <= centers[0] else centers[1]
-                    if x != target_x or y != target_y:
-                        operation = self._movement(x, y, target_x, target_y)
-                        if batch.mask_views.unit_ops[
-                            environment, player, unit, operation
-                        ]:
-                            unit_actions[environment, player, unit, 0] = operation
-                        continue
+        def task_field(values: NDArray) -> NDArray:
+            return np.take_along_axis(values, safe_task, axis=2)
 
-                    operation = self._OPERATIONS.get(kind, UnitOp.PASS)
-                    item = int(tasks.item[environment, player, task_index])
-                    count = int(tasks.quantity[environment, player, task_index])
-                    if not batch.mask_views.unit_ops[
-                        environment, player, unit, operation
-                    ]:
-                        continue
-                    if operation in self._ARGUMENT_OPERATIONS:
-                        if item < 0 or not batch.mask_views.unit_args[
-                            environment, player, unit, operation, item
-                        ]:
-                            continue
-                    unit_actions[environment, player, unit] = (
-                        operation,
-                        max(0, item),
-                        count,
-                    )
+        target_x = task_field(tasks.target_x).copy()
+        target_y = task_field(tasks.target_y).copy()
+        kind = task_field(tasks.kind)
+        item = task_field(tasks.item)
+        count = task_field(tasks.quantity)
+
+        deposit = assigned & (kind == TaskKind.DEPOSIT_INVENTORY)
+        half = self.board_size // 2
+        low_center, high_center = max(0, half - 1), half
+        at_shed = deposit & np.isin(unit_x, (low_center, high_center)) & np.isin(
+            unit_y, (low_center, high_center)
+        )
+        target_x[deposit] = np.where(
+            unit_x[deposit] <= low_center, low_center, high_center
+        )
+        target_y[deposit] = np.where(
+            unit_y[deposit] <= low_center, low_center, high_center
+        )
+
+        moving = assigned & ~at_shed & (
+            (unit_x != target_x) | (unit_y != target_y)
+        )
+        movement = np.where(
+            unit_x < target_x,
+            UnitOp.EAST,
+            np.where(
+                unit_x > target_x,
+                UnitOp.WEST,
+                np.where(unit_y < target_y, UnitOp.SOUTH, UnitOp.NORTH),
+            ),
+        ).astype(np.int64)
+
+        operation_lookup = np.full(max(TaskKind) + 1, UnitOp.PASS, dtype=np.int64)
+        for task_kind, operation in self._OPERATIONS.items():
+            operation_lookup[task_kind] = operation
+        operation = operation_lookup[kind]
+        operation = np.where(moving, movement, operation)
+        operation = np.where(at_shed, UnitOp.DROP, operation)
+
+        grid = np.indices(assigned.shape)
+        legal = assigned & batch.mask_views.unit_ops[
+            grid[0], grid[1], grid[2], operation
+        ]
+        interaction = assigned & ~moving & ~at_shed
+        needs_argument = interaction & np.isin(
+            operation, tuple(self._ARGUMENT_OPERATIONS)
+        )
+        safe_item = np.maximum(item, 0)
+        argument_legal = batch.mask_views.unit_args[
+            grid[0], grid[1], grid[2], operation, safe_item
+        ]
+        legal &= ~needs_argument | ((item >= 0) & argument_legal)
+
+        unit_actions[..., 0][legal] = operation[legal]
+        write_arguments = legal & interaction
+        unit_actions[..., 1][write_arguments] = safe_item[write_arguments]
+        unit_actions[..., 2][write_arguments] = count[write_arguments]
 
     @staticmethod
     def _movement(x: int, y: int, target_x: int, target_y: int) -> UnitOp:
