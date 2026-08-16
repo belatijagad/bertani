@@ -1,7 +1,7 @@
 [project]
 name = "bertani"
 version = "0.1.0"
-description = "Add your description here"
+description = "Fast Rust tooling for the Kaggriculture reinforcement-learning competition"
 readme = "README.md"
 authors = [
     { name = "belatijagad", email = "belatijagadbintangsyuhada@gmail.com" }
@@ -9,7 +9,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "kaggle>=2.2.4",
-    "kaggle-environments>=1.32.7",
+    # The Rust rules engine is differential-tested against this exact oracle.
+    "kaggle-environments==1.32.7",
 ]
 
 [project.scripts]

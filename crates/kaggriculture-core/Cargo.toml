@@ -1,0 +1,15 @@
+[package]
+name = "kaggriculture-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "kaggriculture_core"
+
+[dev-dependencies]
+flate2 = "1"
+serde_json = "1"
+
+[lints]
+workspace = true
