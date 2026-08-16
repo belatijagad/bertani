@@ -92,6 +92,17 @@ uv run maturin develop --release
 uv run python scripts/benchmark_vec_env.py
 ```
 
+Run submission-compatible agents on common seeds in both seat orders with:
+
+```bash
+uv run python scripts/pit_agents.py \
+  baselines/v16_rc5/main.py path/to/rule_agent/main.py \
+  --seeds 11 12 13
+```
+
+The preserved V16-RC5 baseline and its provenance are documented in
+[`baselines/v16_rc5/README.md`](baselines/v16_rc5/README.md).
+
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
 
 Regenerate the Python reference trace after an intentional oracle update with:
@@ -108,6 +119,7 @@ See [the rules-engine notes](docs/rules-engine.md) for the exact transition orde
 crates/kaggriculture-core/  deterministic Rust simulator
 crates/bertani-python/      PyO3 vector environment and encoders
 scripts/                    Python-oracle fixture generation
+baselines/                  immutable submission-compatible opponents
 src/bertani/                typed Python wrapper and NumPy buffer views
 references/                 local competition references; gitignored
 ```
