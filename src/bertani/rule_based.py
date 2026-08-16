@@ -265,7 +265,10 @@ class VectorRulePolicy:
         if self.last_tasks is None or self.last_tasks.active.shape != expected_shape:
             self.last_tasks = TaskBatch.allocate(n, players, board_size)
             self._task_scheduler = TaskScheduler(
-                board_size, shed_capacity=self.config.shed_capacity
+                board_size,
+                shed_capacity=self.config.shed_capacity,
+                episode_steps=self.config.episode_steps,
+                turns_per_day=self.config.turns_per_day,
             )
             self._task_executor = TaskExecutor(board_size)
         return self.last_tasks

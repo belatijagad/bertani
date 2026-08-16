@@ -33,6 +33,8 @@ pub(crate) fn schedule_tasks<'py>(
     task_zone: Bound<'py, PyArray3<i16>>,
     role_bonus: f32,
     zone_bonus: f32,
+    previous_task: Bound<'py, PyArray3<i64>>,
+    continuity_bonus: f32,
     board_size: usize,
     task_index: Bound<'py, PyArray3<i64>>,
     output_scores: Bound<'py, PyArray3<f32>>,
@@ -73,6 +75,11 @@ pub(crate) fn schedule_tasks<'py>(
         ("unit_role", unit_role.shape(), unit_shape.as_slice()),
         ("unit_zone", unit_zone.shape(), unit_shape.as_slice()),
         ("task_zone", task_zone.shape(), task_shape.as_slice()),
+        (
+            "previous_task",
+            previous_task.shape(),
+            unit_shape.as_slice(),
+        ),
         ("task_index", task_index.shape(), unit_shape.as_slice()),
         (
             "output_scores",
@@ -115,6 +122,7 @@ pub(crate) fn schedule_tasks<'py>(
         ("unit_role", unit_role.is_c_contiguous()),
         ("unit_zone", unit_zone.is_c_contiguous()),
         ("task_zone", task_zone.is_c_contiguous()),
+        ("previous_task", previous_task.is_c_contiguous()),
         ("task_index", task_index.is_c_contiguous()),
         ("output_scores", output_scores.is_c_contiguous()),
     ] {
@@ -141,6 +149,7 @@ pub(crate) fn schedule_tasks<'py>(
     let unit_role_guard = unit_role.try_readonly()?;
     let unit_zone_guard = unit_zone.try_readonly()?;
     let task_zone_guard = task_zone.try_readonly()?;
+    let previous_task_guard = previous_task.try_readonly()?;
     let unit_x = unit_x_guard.as_slice()?;
     let unit_y = unit_y_guard.as_slice()?;
     let inventories = inventories_guard.as_slice()?;
@@ -157,6 +166,7 @@ pub(crate) fn schedule_tasks<'py>(
     let unit_role = unit_role_guard.as_slice()?;
     let unit_zone = unit_zone_guard.as_slice()?;
     let task_zone = task_zone_guard.as_slice()?;
+    let previous_task = previous_task_guard.as_slice()?;
     let mut task_index = task_index.try_readwrite()?;
     let mut output_scores = output_scores.try_readwrite()?;
     let task_index = task_index.as_slice_mut()?;
@@ -235,11 +245,12 @@ pub(crate) fn schedule_tasks<'py>(
                             } else {
                                 0.0
                             };
-                        // FIELD is role 3. Territory preference is deliberately
-                        // ignored for logistics and livestock tasks near the
-                        // shed so those routes can use any suitable worker.
+                        // Territorial affinity applies to board work, but not
+                        // global shed/logistics slots.
                         let preferred_zone = unit_zone[unit_start + unit];
-                        let zone_affinity = if assigned_role == 3
+                        let flexible_field_work = task_kind[task_start + task] == 6;
+                        let zone_affinity = if task < board_size * board_size
+                            && flexible_field_work
                             && preferred_zone >= 0
                             && preferred_zone == task_zone[task_start + task]
                         {
@@ -247,9 +258,17 @@ pub(crate) fn schedule_tasks<'py>(
                         } else {
                             0.0
                         };
+                        let continuity_affinity = if previous_task[unit_start + unit]
+                            == i64::try_from(task).unwrap_or(-1)
+                        {
+                            continuity_bonus
+                        } else {
+                            0.0
+                        };
                         let score = priorities[task_start + task] - f32::from(distance)
                             + role_affinity
-                            + zone_affinity;
+                            + zone_affinity
+                            + continuity_affinity;
                         if score.is_finite()
                             && best.is_none_or(|(_, _, best_score)| score > best_score)
                         {

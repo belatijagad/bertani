@@ -264,13 +264,24 @@ class WorkforcePlanner(Protocol):
 
 
 class TaskScheduler:
-    """Assign urgency bands using minimum-distance unit/task pairs."""
+    """Assign urgency bands while preserving valid within-day worker jobs."""
 
-    def __init__(self, board_size: int, shed_capacity: int = 100) -> None:
+    def __init__(
+        self,
+        board_size: int,
+        shed_capacity: int = 100,
+        continuity_bonus: float = 1.0,
+        episode_steps: int = 720,
+        turns_per_day: int = 24,
+    ) -> None:
         self.board_size = board_size
         self.shed_capacity = shed_capacity
+        self.continuity_bonus = continuity_bonus
+        self.last_step = max(1, episode_steps - 1)
+        self.turns_per_day = turns_per_day
         self._shape: tuple[int, int, int] | None = None
         self._assignments: TaskAssignments | None = None
+        self._previous_task: NDArray[np.int64] | None = None
 
     def assign(
         self,
@@ -285,10 +296,19 @@ class TaskScheduler:
                 task_index=np.full(shape, -1, dtype=np.int64),
                 score=np.full(shape, -np.inf, dtype=np.float32),
             )
+            self._previous_task = np.full(shape, -1, dtype=np.int64)
             self._shape = shape
         assignments = self._assignments
+        assert self._previous_task is not None
         assignments.task_index.fill(-1)
         assignments.score.fill(-np.inf)
+
+        step = np.rint(
+            batch.observation_views.global_features[..., 0] * self.last_step
+        ).astype(np.int64)
+        new_day = (step % self.turns_per_day) == 0
+        self._previous_task[new_day] = -1
+        self._previous_task[~batch.active_units] = -1
 
         units = batch.observation_views.units[:, :, 0]
         scale = max(1, self.board_size - 1)
@@ -336,6 +356,8 @@ class TaskScheduler:
                 task_zone,
                 role_bonus,
                 zone_bonus,
+                self._previous_task,
+                self.continuity_bonus,
                 tasks.board_size,
                 assignments.task_index,
                 assignments.score,
@@ -350,13 +372,21 @@ class TaskScheduler:
                 (unit_role[..., None] != WorkRole.ANY)
                 & (unit_role[..., None] == tasks.work_role[..., None, :])
             )
-            field_task = tasks.work_role == WorkRole.FIELD
+            field_task = (
+                (tasks.kind == TaskKind.CLEAR_WEED)
+                & (np.arange(tasks.capacity) < tasks.tile_slots)
+            )
             zone_match = (
                 (unit_zone[..., None] != WorkZone.ANY)
                 & field_task[..., None, :]
                 & (unit_zone[..., None] == task_zone[..., None, :])
             )
             scores += role_match * role_bonus + zone_match * zone_bonus
+            task_indices = np.arange(tasks.capacity, dtype=np.int64)
+            continuing = (
+                self._previous_task[..., None] == task_indices
+            )
+            scores += continuing * self.continuity_bonus
             eligible = batch.active_units[..., None] & tasks.active[..., None, :]
             for item_index in range(inventories.shape[-1]):
                 required = tasks.required_item == item_index
@@ -379,6 +409,8 @@ class TaskScheduler:
                 unit_y,
                 inventories,
             )
+        self._previous_task[...] = assignments.task_index
+        self._previous_task[~batch.active_units] = -1
         return assignments
 
     @staticmethod

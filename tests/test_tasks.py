@@ -3,9 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import bertani.tasks as task_module
+
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
-from bertani_rules.agent import OPENING_BOOK, build_policy
+from bertani_rules.agent import (
+    OPENING_BOOK,
+    TerritorialWorkforcePlanner,
+    build_policy,
+)
 
 from bertani import (
     MarketOp,
@@ -187,6 +193,57 @@ def test_scheduler_prefers_nearby_work_within_an_urgency_band() -> None:
     assert assignments.task_index[0, 0, 0] == 0
 
 
+@pytest.mark.parametrize("use_native", (True, False))
+def test_scheduler_persists_a_job_until_a_higher_urgency_band_interrupts(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    scheduler = TaskScheduler(env.board_size, continuity_bonus=1.0)
+
+    first = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    second = np.zeros_like(first)
+    first[0, 0, 3, 4] = True
+    second[0, 0, 6, 4] = True
+    tasks.propose_tiles(TaskKind.CARE, first, 100.0)
+    tasks.propose_tiles(TaskKind.CARE, second, 100.0)
+    assignments = scheduler.assign(batch, tasks)
+    first_slot = 3 * env.board_size + 4
+    second_slot = 6 * env.board_size + 4
+    assert assignments.task_index[0, 0, 0] == first_slot
+
+    # Move closer to the second job. The small distance advantage must not
+    # cause route thrashing while the first job remains valid.
+    batch.observation_views.global_features[..., 0] = 1 / 719
+    batch.observation_views.units[0, 0, 0, 0, 3] = 5 / 9
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == first_slot
+
+    # Hand indices refer to newly hired workers on the next day, so affinity
+    # must not leak across the boundary.
+    batch.observation_views.global_features[..., 0] = 24 / 719
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == second_slot
+
+    # Re-establish the first job before checking emergency interruption.
+    batch.observation_views.global_features[..., 0] = 25 / 719
+    batch.observation_views.units[0, 0, 0, 0, 3] = 4 / 9
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == first_slot
+
+    # Urgency bands are hard boundaries: persistence never blocks an emergency.
+    tasks.clear()
+    tasks.propose_tiles(TaskKind.CARE, first, 109.0)
+    tasks.propose_tiles(TaskKind.FEED, second, 110.0)
+    batch.observation_views.global_features[..., 0] = 26 / 719
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == second_slot
+
+
 def test_scheduler_supports_soft_workforce_roles() -> None:
     env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
     batch = env.reset()
@@ -218,3 +275,44 @@ def test_scheduler_supports_soft_workforce_roles() -> None:
         WorkforcePlan(role=role, zone=zone, role_bonus=4.0),
     )
     assert assignments.task_index[0, 0, 0] == 4 * env.board_size + 3
+
+
+def test_workforce_zones_follow_quadrant_demand_without_intraday_thrashing() -> None:
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    batch.active_units[0, 0, :5] = True
+    batch.observation_views.farms[0, 0, 0, 4:8] = 1.0
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    mask = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    mask[0, 0, 0, 0] = True
+    mask[0, 0, :3, 5:7] = True
+    tasks.propose_tiles(
+        TaskKind.CLEAR_WEED,
+        mask,
+        99.0,
+        work_role=WorkRole.FIELD,
+    )
+    planner = TerritorialWorkforcePlanner(zone_bonus=0.1)
+    intent = build_policy(use_opening=False).plan(batch)
+
+    first = planner(batch, intent, tasks)
+    assigned = first.zone[0, 0, 1:5]
+    assert np.count_nonzero(assigned == WorkZone.NE) > np.count_nonzero(
+        assigned == WorkZone.NW
+    )
+
+    tasks.clear()
+    southwest = np.zeros_like(mask)
+    southwest[0, 0, 5:, :5] = True
+    tasks.propose_tiles(
+        TaskKind.PLANT,
+        southwest,
+        104.0,
+        work_role=WorkRole.FIELD,
+    )
+    second = planner(batch, intent, tasks)
+    np.testing.assert_array_equal(second.zone, first.zone)
+
+    batch.observation_views.global_features[..., 0] = 24 / 719
+    third = planner(batch, intent, tasks)
+    assert np.count_nonzero(third.zone[0, 0, 1:5] == WorkZone.SW) == 4

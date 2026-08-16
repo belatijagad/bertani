@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+from numpy.typing import NDArray
 
 from bertani.market import MarketPlanBatch, MarketRule
 from bertani.opening import OpeningController, OpeningTurn
@@ -412,7 +413,7 @@ class IntentPlanner:
 
 
 class TerritorialWorkforcePlanner:
-    """Keep logistics, livestock, and field crews on compact daily routes."""
+    """Allocate crews to quadrants in proportion to their live task backlog."""
 
     def __init__(
         self,
@@ -427,6 +428,9 @@ class TerritorialWorkforcePlanner:
         self.last_step = max(1, episode_steps - 1)
         self.role_bonus = role_bonus
         self.zone_bonus = zone_bonus
+        self._zone_shape: tuple[int, int, int] | None = None
+        self._daily_zone: NDArray[np.int16] | None = None
+        self._last_day: NDArray[np.int64] | None = None
 
     def __call__(
         self,
@@ -434,7 +438,7 @@ class TerritorialWorkforcePlanner:
         intent: StrategicIntent,
         tasks: TaskBatch,
     ) -> WorkforcePlan:
-        del intent, tasks
+        del intent
         active = batch.active_units
         shape = active.shape
         role = np.full(shape, WorkRole.ANY, dtype=np.int16)
@@ -460,14 +464,86 @@ class TerritorialWorkforcePlanner:
         role[field] = WorkRole.FIELD
 
         farms = batch.observation_views.farms[:, :, 0]
-        unlocked_count = np.maximum(
-            1, np.rint(farms[..., 4:8].sum(axis=-1)).astype(np.int16)
+        unlocked = np.rint(farms[..., 4:8]).astype(np.bool_)
+
+        # Estimate one-turn workload rather than splitting workers evenly.
+        # Survival and harvest jobs receive extra mass because delaying them can
+        # destroy assets or block the following planting job.  Weeds and empty
+        # tiles therefore attract workers naturally when their backlog grows.
+        kind = tasks.kind
+        weight = np.ones_like(tasks.priority, dtype=np.float32)
+        weight += np.isin(
+            kind,
+            (TaskKind.WATER, TaskKind.FEED, TaskKind.CARE),
+        ).astype(np.float32)
+        weight += 0.5 * np.isin(
+            kind,
+            (TaskKind.HARVEST, TaskKind.CLEAR_WEED, TaskKind.PLANT),
+        ).astype(np.float32)
+        task_slots = np.arange(tasks.capacity)[None, None, :]
+        tile_task = task_slots < tasks.tile_slots
+        task_zone = (
+            (tasks.target_y >= tasks.board_size // 2).astype(np.int16) * 2
+            + (tasks.target_x >= tasks.board_size // 2).astype(np.int16)
         )
-        field_rank = np.maximum(
-            0, unit_index - livestock_workers[..., None] - 1
+        demand = np.zeros((*shape[:2], 4), dtype=np.float32)
+        for quadrant in range(4):
+            in_quadrant = (
+                tasks.active
+                & tile_task
+                & (task_zone == quadrant)
+                & (tasks.work_role != WorkRole.LOGISTICS)
+            )
+            demand[..., quadrant] = (weight * in_quadrant).sum(axis=-1)
+        demand = np.where(unlocked, demand, 0.0)
+
+        territory_workers = active & ~logistics
+        total_demand = demand.sum(axis=-1)
+        fallback = unlocked.astype(np.float32)
+        effective_demand = np.where(
+            (total_demand > 0)[..., None], demand, fallback
         )
-        assigned_zone = field_rank % unlocked_count[..., None]
-        zone[field] = assigned_zone[field]
+        step = np.rint(
+            batch.observation_views.global_features[..., 0] * self.last_step
+        ).astype(np.int64)
+        day = step // self.turns_per_day
+        if self._zone_shape != shape:
+            self._daily_zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
+            self._last_day = np.full(shape[:2], -1, dtype=np.int64)
+            self._zone_shape = shape
+        assert self._daily_zone is not None
+        assert self._last_day is not None
+        new_day = day != self._last_day
+        self._daily_zone[new_day] = WorkZone.ANY
+        self._daily_zone[~active] = WorkZone.ANY
+        self._last_day[...] = day
+
+        # Assign each newly hired worker to the quadrant with the highest
+        # remaining demand per assigned worker. Keep that territory for the
+        # rest of the day so a changing task list cannot make routes thrash.
+        assigned_count = np.stack(
+            [
+                ((self._daily_zone == quadrant) & territory_workers).sum(
+                    axis=-1
+                )
+                for quadrant in range(4)
+            ],
+            axis=-1,
+        ).astype(np.float32)
+        for worker in range(1, shape[-1]):
+            needs_zone = territory_workers[..., worker] & (
+                self._daily_zone[..., worker] == WorkZone.ANY
+            )
+            pressure = effective_demand / (assigned_count + 1.0)
+            chosen = np.argmax(pressure, axis=-1).astype(np.int16)
+            self._daily_zone[..., worker] = np.where(
+                needs_zone, chosen, self._daily_zone[..., worker]
+            )
+            for quadrant in range(4):
+                assigned_count[..., quadrant] += needs_zone & (
+                    chosen == quadrant
+                )
+        zone[territory_workers] = self._daily_zone[territory_workers]
 
         # Inventory state overrides the default daily role. A worker already
         # carrying an animal should finish pasture placement; any other loaded
@@ -483,17 +559,11 @@ class TerritorialWorkforcePlanner:
         role[active & carrying_anything] = WorkRole.LOGISTICS
         role[active & carrying_animal] = WorkRole.LIVESTOCK
 
-        step = np.rint(
-            batch.observation_views.global_features[..., 0] * self.last_step
-        ).astype(np.int64)
-        day = step // self.turns_per_day
-        expansion_routing = bool(((day >= 7) & (day <= 8)).all())
-
         return WorkforcePlan(
             role=role,
             zone=zone,
             role_bonus=self.role_bonus,
-            zone_bonus=self.zone_bonus if expansion_routing else 0.0,
+            zone_bonus=self.zone_bonus,
         )
 
 
@@ -733,6 +803,9 @@ class ProductionTaskRule:
         self.shed_capacity = shed_capacity
         self.turns_per_day = turns_per_day
         self.last_step = max(1, episode_steps - 1)
+        self.episode_days = max(
+            1, (episode_steps + turns_per_day - 1) // turns_per_day
+        )
 
     def propose(
         self,
@@ -744,11 +817,20 @@ class ProductionTaskRule:
         tiles = views.tiles[:, :, 0]
         productive = ~intent.liquidate
 
+        step = np.rint(
+            views.global_features[..., 0] * self.last_step
+        ).astype(np.int64)
+        hour = step % self.turns_per_day
+        day = step // self.turns_per_day
         weeds = (tiles[..., 2] > 0.5) & productive[..., None, None]
+        weed_count = weeds.sum(axis=(2, 3))
+        weed_priority = np.where(
+            (day >= 22) & (weed_count >= 4), 109.0, 99.0
+        )
         tasks.propose_tiles(
             TaskKind.CLEAR_WEED,
             weeds,
-            87.0,
+            weed_priority[..., None, None],
             work_role=WorkRole.FIELD,
         )
 
@@ -798,11 +880,6 @@ class ProductionTaskRule:
             work_role=WorkRole.LIVESTOCK,
         )
 
-        step = np.rint(
-            views.global_features[..., 0] * self.last_step
-        ).astype(np.int64)
-        hour = step % self.turns_per_day
-        day = step // self.turns_per_day
         # A plant starts with one missed watering day. Leave enough turns for a
         # worker to water it before the end-of-day refresh.
         safe_to_plant = hour < self.turns_per_day - 2
@@ -866,6 +943,36 @@ class ProductionTaskRule:
                     115.0,
                     97.0,
                 ),
+                item=crop,
+                work_role=WorkRole.FIELD,
+            )
+
+        # Strategic targets govern purchases, but seeds already in storage are
+        # sunk cost. Use any viable surplus to reclaim empty productive tiles
+        # without causing the market rule to buy a larger seed inventory.
+        remaining_days = self.episode_days - day
+        for crop, maturity_days in (
+            (Item.WHEAT, 4),
+            (Item.CARROT, 3),
+            (Item.MELON, 10),
+            (Item.TOMATO, 8),
+            (Item.STRAWBERRY, 10),
+        ):
+            surplus = np.maximum(0, seeds[..., crop] - planned_seed_use[..., crop])
+            available = np.where(remaining_days > maturity_days, surplus, 0)
+            selected = self._select_limited_by_distance(
+                empty & ~claimed,
+                available,
+                center_distance,
+                existing_production | claimed,
+            )
+            selected_count = selected.sum(axis=(2, 3), dtype=np.int64)
+            claimed |= selected
+            planned_seed_use[..., crop] += selected_count
+            tasks.propose_tiles(
+                TaskKind.PLANT,
+                selected,
+                104.0,
                 item=crop,
                 work_role=WorkRole.FIELD,
             )
@@ -1381,6 +1488,8 @@ def build_policy(
             shed_capacity=resolved.shed_capacity,
             turns_per_day=resolved.turns_per_day,
             episode_steps=resolved.episode_steps,
+            role_bonus=0.0,
+            zone_bonus=0.1,
         ),
         opening_controller=(
             OpeningController(
@@ -1412,8 +1521,6 @@ def build_policy(
             ),
         ),
     )
-
-
 __all__ = [
     "EconomyMarketRule",
     "MaintenanceTaskRule",

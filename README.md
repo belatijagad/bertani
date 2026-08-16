@@ -72,7 +72,9 @@ NumPy, arbitrates typed `TaskBatch` objectives, assigns units, and serializes
 masked actions through a reusable executor. Ordered `MarketPlanBatch` objects
 track market actions and resource reservations. The intent planner is
 replaceable, so a learned planner can later retain deterministic legality,
-logistics, and action encoding. See
+logistics, and action encoding. Within a day, the scheduler retains a worker's
+valid task as a small tie-breaker, allowing tile workflows such as harvest and
+replant to continue without blocking higher-urgency survival work. See
 [the rule-based agent architecture](docs/rule-based-agent.md).
 
 Run validation with:
@@ -111,9 +113,10 @@ uv run python scripts/pit_v16_native.py --seeds 11 451781128 874717982
 ```
 
 The native adapter reproduces V16's trace, weed recovery, and market
-front-running directly in tensors. Its fixed three-seed results match the
-submission-compatible Python runner exactly. Continue using `pit_agents.py`
-as the final Kaggle-format check; use `pit_v16_native.py` for broad searches.
+front-running directly in tensors. V16 remains evaluation-only: the current
+agent does not import or execute its action trace. Continue using
+`pit_agents.py` as the final Kaggle-format check and `pit_v16_native.py` for
+broad searches.
 
 Compare daily rule-agent state, inventory, purchases, sales, and unit actions
 against all downloaded leaderboard replays with:
@@ -148,10 +151,8 @@ uv run python scripts/package_rule_agent.py
 
 This writes `dist/rule_based_submission.tar.gz` with `main.py` at the archive
 root. All concrete decisions live in `src/bertani_rules/agent.py`; reusable
-planning and execution abstractions remain under `src/bertani`. Improvements
-overwrite this single development policy until it beats the preserved baseline.
-The bundled observation adapter uses NumPy but does not require the local Rust
-extension.
+planning and execution abstractions remain under `src/bertani`. The bundled
+observation adapter uses NumPy but does not require the local Rust extension.
 
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
 
