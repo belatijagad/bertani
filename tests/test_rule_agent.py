@@ -40,6 +40,27 @@ def test_intent_uses_stable_cohort_and_yarn_store_branch() -> None:
     np.testing.assert_array_equal(intent.target_animal_counts[..., 2], 12)
 
 
+def test_exhausted_strawberry_is_retired_before_it_decays_to_a_weed() -> None:
+    env = VecEnv(1, weed_spawn_chance=0.0)
+    batch = env.reset()
+    policy = build_policy(use_opening=False)
+    batch.observation_views.global_features[..., 0] = (20 * 24) / 719
+    tile = batch.observation_views.tiles[0, 0, 0, 0, 0]
+    tile.fill(0.0)
+    tile[3] = 1.0
+    tile[9 + int(Item.STRAWBERRY)] = 1.0
+    tile[14] = 16 / 30
+    tile[15] = 1.0
+
+    policy.act(batch, max_orders=env.max_orders)
+    assert policy.last_tasks is not None
+    assert policy.last_tasks.kind[0, 0, 0] == TaskKind.CLEAR_WEED
+
+    tile[23] = 1.0
+    policy.act(batch, max_orders=env.max_orders)
+    assert policy.last_tasks.kind[0, 0, 0] == TaskKind.HARVEST
+
+
 def test_one_early_yarn_store_uses_compact_sheep_branch() -> None:
     env = VecEnv(1, weed_spawn_chance=0.0)
     batch = env.reset()

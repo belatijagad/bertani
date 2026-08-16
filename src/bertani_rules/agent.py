@@ -495,6 +495,7 @@ class TerritorialWorkforcePlanner:
                 & (tasks.work_role != WorkRole.LOGISTICS)
             )
             demand[..., quadrant] = (weight * in_quadrant).sum(axis=-1)
+
         demand = np.where(unlocked, demand, 0.0)
 
         territory_workers = active & ~logistics
@@ -823,6 +824,21 @@ class ProductionTaskRule:
         hour = step % self.turns_per_day
         day = step // self.turns_per_day
         weeds = (tiles[..., 2] > 0.5) & productive[..., None, None]
+        crop_age = np.rint(tiles[..., 14] * self.episode_days).astype(np.int16)
+        crop_channels = tiles[..., 9:14] > 0.5
+        harvestable = tiles[..., 23] > 0.5
+        exhausted_ongoing = (
+            (
+                (crop_channels[..., Item.TOMATO] & (crop_age >= 11))
+                | (
+                    crop_channels[..., Item.STRAWBERRY]
+                    & (crop_age >= 16)
+                )
+            )
+            & ~harvestable
+            & (day <= self.episode_days - 5)[..., None, None]
+            & productive[..., None, None]
+        )
         weed_count = weeds.sum(axis=(2, 3))
         weed_priority = np.where(
             (day >= 22) & (weed_count >= 4), 109.0, 99.0
@@ -831,6 +847,12 @@ class ProductionTaskRule:
             TaskKind.CLEAR_WEED,
             weeds,
             weed_priority[..., None, None],
+            work_role=WorkRole.FIELD,
+        )
+        tasks.propose_tiles(
+            TaskKind.CLEAR_WEED,
+            exhausted_ongoing,
+            99.0,
             work_role=WorkRole.FIELD,
         )
 
@@ -972,7 +994,7 @@ class ProductionTaskRule:
             tasks.propose_tiles(
                 TaskKind.PLANT,
                 selected,
-                104.0,
+                np.where((day >= 22)[..., None, None], 105.0, 104.0),
                 item=crop,
                 work_role=WorkRole.FIELD,
             )

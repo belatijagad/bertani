@@ -244,6 +244,34 @@ def test_scheduler_persists_a_job_until_a_higher_urgency_band_interrupts(
     assert assignments.task_index[0, 0, 0] == second_slot
 
 
+@pytest.mark.parametrize("use_native", (True, False))
+def test_scheduler_keeps_a_field_contract_within_the_top_urgency_band(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    scheduler = TaskScheduler(env.board_size)
+    first = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    second = np.zeros_like(first)
+    first[0, 0, 3, 4] = True
+    second[0, 0, 6, 4] = True
+    tasks.propose_tiles(TaskKind.PLANT, first, 109.0)
+    tasks.propose_tiles(TaskKind.PLANT, second, 100.0)
+    first_slot = 3 * env.board_size + 4
+    scheduler.assign(batch, tasks)
+
+    tasks.clear()
+    tasks.propose_tiles(TaskKind.PLANT, first, 100.0)
+    tasks.propose_tiles(TaskKind.PLANT, second, 109.0)
+    batch.observation_views.global_features[..., 0] = 1 / 719
+    batch.observation_views.units[0, 0, 0, 0, 3] = 5 / 9
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == first_slot
+
 def test_scheduler_supports_soft_workforce_roles() -> None:
     env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
     batch = env.reset()

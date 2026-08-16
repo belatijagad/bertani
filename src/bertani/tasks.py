@@ -409,9 +409,92 @@ class TaskScheduler:
                 unit_y,
                 inventories,
             )
+        self._preserve_workflow_contracts(
+            batch, tasks, assignments, unit_x, unit_y, inventories
+        )
         self._previous_task[...] = assignments.task_index
         self._previous_task[~batch.active_units] = -1
         return assignments
+
+    def _preserve_workflow_contracts(
+        self,
+        batch: Batch,
+        tasks: TaskBatch,
+        assignments: TaskAssignments,
+        unit_x: NDArray[np.int16],
+        unit_y: NDArray[np.int16],
+        inventories: NDArray[np.int64],
+    ) -> None:
+        """Keep field workflows owned while they remain in the top urgency band."""
+
+        assert self._previous_task is not None
+        workflow_kinds = {
+            int(TaskKind.HARVEST),
+            int(TaskKind.CLEAR_WEED),
+            int(TaskKind.PLANT),
+        }
+        n, players, _ = batch.active_units.shape
+        for environment in range(n):
+            for player in range(players):
+                active_tasks = np.flatnonzero(tasks.active[environment, player])
+                if active_tasks.size == 0:
+                    continue
+                top_band = np.floor(
+                    tasks.priority[environment, player, active_tasks] / 10.0
+                ).max()
+                locked_units: set[int] = set()
+                for unit in np.flatnonzero(batch.active_units[environment, player]):
+                    previous = int(self._previous_task[environment, player, unit])
+                    if previous < 0 or previous >= tasks.tile_slots:
+                        continue
+                    if not tasks.active[environment, player, previous]:
+                        continue
+                    if int(tasks.kind[environment, player, previous]) not in workflow_kinds:
+                        continue
+                    if np.floor(tasks.priority[environment, player, previous] / 10.0) < top_band:
+                        continue
+                    required = int(tasks.required_item[environment, player, previous])
+                    if required >= 0 and inventories[
+                        environment, player, unit, required
+                    ] < tasks.required_count[environment, player, previous]:
+                        continue
+                    current = int(assignments.task_index[environment, player, unit])
+                    if current == previous:
+                        locked_units.add(int(unit))
+                        continue
+                    owners = np.flatnonzero(
+                        assignments.task_index[environment, player] == previous
+                    )
+                    owner = int(owners[0]) if owners.size else -1
+                    if owner >= 0:
+                        worker_distance = abs(
+                            int(unit_x[environment, player, unit])
+                            - int(tasks.target_x[environment, player, previous])
+                        ) + abs(
+                            int(unit_y[environment, player, unit])
+                            - int(tasks.target_y[environment, player, previous])
+                        )
+                        owner_distance = abs(
+                            int(unit_x[environment, player, owner])
+                            - int(tasks.target_x[environment, player, previous])
+                        ) + abs(
+                            int(unit_y[environment, player, owner])
+                            - int(tasks.target_y[environment, player, previous])
+                        )
+                        if worker_distance > owner_distance:
+                            continue
+                    assignments.task_index[environment, player, unit] = previous
+                    assignments.score[environment, player, unit] = tasks.priority[
+                        environment, player, previous
+                    ]
+                    locked_units.add(int(unit))
+                    if owner >= 0 and owner not in locked_units:
+                        assignments.task_index[environment, player, owner] = current
+                        assignments.score[environment, player, owner] = (
+                            tasks.priority[environment, player, current]
+                            if current >= 0
+                            else -np.inf
+                        )
 
     @staticmethod
     def _prefer_unclaimed_local_tasks(
