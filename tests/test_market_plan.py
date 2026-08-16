@@ -11,7 +11,7 @@ from bertani import (
     VecEnv,
     VectorRulePolicy,
 )
-from bertani_rules.v1 import V1IntentPlanner
+from bertani_rules.agent import IntentPlanner
 
 
 def test_market_plan_preserves_order_and_resource_reservations() -> None:
@@ -65,7 +65,7 @@ def test_custom_market_rule_consumes_intent_without_raw_tensor_access() -> None:
     config = RuleConfig()
     policy = VectorRulePolicy(
         config,
-        intent_planner=V1IntentPlanner(config),
+        intent_planner=IntentPlanner(config),
         task_rules=(),
         market_rules=(OpeningHireRule(),),
     )

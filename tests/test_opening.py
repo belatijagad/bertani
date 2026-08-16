@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
-from bertani_rules.v1 import OPENING_BOOK, build_policy
+from bertani_rules.agent import OPENING_BOOK, build_policy
 
 from bertani import (
     Item,

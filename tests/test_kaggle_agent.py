@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from kaggle_environments import make
 
-from bertani_rules.v1 import build_policy
+from bertani_rules.agent import build_policy
 from bertani.kaggle_agent import make_agent
 
 

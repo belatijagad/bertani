@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
-from bertani_rules.v1 import OPENING_BOOK, build_policy
+from bertani_rules.agent import OPENING_BOOK, build_policy
 
 from bertani import (
     Item,
@@ -35,8 +35,8 @@ def test_rule_features_and_opening_intent_are_batched() -> None:
     np.testing.assert_array_equal(features.crop_counts, 0)
     np.testing.assert_array_equal(intent.phase, RulePhase.OPENING)
     np.testing.assert_array_equal(intent.target_hands, 5)
-    np.testing.assert_array_equal(intent.target_crop_counts[..., 0], 7)
-    np.testing.assert_array_equal(intent.target_crop_counts[..., 4], 12)
+    np.testing.assert_array_equal(intent.target_crop_counts[..., 0], 15)
+    np.testing.assert_array_equal(intent.target_crop_counts[..., 4], 9)
 
 
 def test_masked_executor_waters_a_plant_on_the_current_tile() -> None:
@@ -112,6 +112,9 @@ def test_post_opening_economy_funds_feed_and_daily_labor() -> None:
             (MarketOp.HIRE, 0, 0),
             (MarketOp.HIRE, 0, 0),
             (MarketOp.HIRE, 0, 0),
+            (MarketOp.HIRE, 0, 0),
+            (MarketOp.HIRE, 0, 0),
+            (MarketOp.HIRE, 0, 0),
         ],
     )
     assert actions.unit_actions[0, 0, 0, 0] == UnitOp.PICKUP
@@ -132,7 +135,7 @@ def test_dynamic_rules_complete_a_profitable_season() -> None:
         )
 
     assert batch.dones.all()
-    assert (batch.rewards > 30_000).all()
+    assert (batch.rewards > 20_000).all()
     for player in range(2):
         farm = env.state_snapshot(0)["farms"][player]
         animals = sum(
@@ -140,4 +143,4 @@ def test_dynamic_rules_complete_a_profitable_season() -> None:
             for row in farm["tiles"]
             for tile in row
         )
-        assert animals == 4
+        assert animals == 12

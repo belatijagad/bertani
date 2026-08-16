@@ -1,1 +1,1 @@
-"""Versioned Bertani rule-based strategy implementations."""
+"""The concrete Bertani rule-based strategy."""

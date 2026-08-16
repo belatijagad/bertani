@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
-from bertani_rules.v1 import OPENING_BOOK, build_policy
+from bertani_rules.agent import OPENING_BOOK, build_policy
 
 from bertani import (
     MarketOp,
@@ -81,7 +81,7 @@ def test_custom_rule_extends_policy_without_emitting_raw_actions() -> None:
     )
 
 
-def test_post_opening_feed_workflow_fetches_routes_and_feeds() -> None:
+def test_post_opening_feed_workflow_uses_parallel_carriers() -> None:
     env = VecEnv(1, seed=100, weed_spawn_chance=0.0)
     policy = build_policy()
     batch = env.reset()
@@ -93,17 +93,30 @@ def test_post_opening_feed_workflow_fetches_routes_and_feeds() -> None:
             actions.market_lengths,
         )
 
-    expected = [UnitOp.PICKUP, UnitOp.WEST, UnitOp.NORTH, UnitOp.FEED]
-    observed: list[UnitOp] = []
-    for _ in expected:
-        actions = policy.act(batch, max_orders=env.max_orders)
-        observed.append(UnitOp(actions.unit_actions[0, 0, 0, 0]))
+    # The first dynamic turn hires the daily workforce. On the following turn,
+    # several units should fetch wheat concurrently instead of making the main
+    # farmer carry the entire feeding backlog.
+    actions = policy.act(batch, max_orders=env.max_orders)
+    batch = env.step(
+        actions.unit_actions,
+        actions.market_actions,
+        actions.market_lengths,
+    )
+    actions = policy.act(batch, max_orders=env.max_orders)
+    active_ops = actions.unit_actions[0, 0, :9, 0]
+    assert np.count_nonzero(active_ops == UnitOp.PICKUP) >= 2
+
+    observed_feed = False
+    for _ in range(5):
+        active_ops = actions.unit_actions[0, 0, :9, 0]
+        observed_feed |= bool(np.any(active_ops == UnitOp.FEED))
         batch = env.step(
             actions.unit_actions,
             actions.market_actions,
             actions.market_lengths,
         )
+        actions = policy.act(batch, max_orders=env.max_orders)
 
-    assert observed == expected
+    assert observed_feed
     assert policy.last_tasks is not None
     assert policy.last_assignments is not None

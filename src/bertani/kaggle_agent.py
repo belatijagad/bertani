@@ -22,6 +22,16 @@ CROP_NAMES = ITEM_NAMES[:5]
 ANIMAL_NAMES = ITEM_NAMES[9:12]
 PRODUCT_BASE_PRICES = (25, 35, 60, 120, 250, 50, 160, 200, 100)
 QUADRANTS = ("NW", "NE", "SW", "SE")
+SHOP_NAMES = (
+    "BAKERY",
+    "BRUNCH_SPOT",
+    "FARMERS_MARKET",
+    "ICE_CREAM_SHOP",
+    "PET_CAFE",
+    "PIZZA_SHOP",
+    "SMOOTHIE_SHOP",
+    "YARN_STORE",
+)
 UNIT_NAMES = tuple(operation.name for operation in UnitOp)
 MARKET_NAMES = tuple(operation.name for operation in MarketOp)
 
@@ -133,6 +143,11 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
         global_features[0, seat, 5 + 2 * ITEM_NAMES[:9].index(product)] = float(
             _get(market_prices, product, base)
         ) / base
+    unlocked_shops = list(
+        _get(_get(obs, "town", {}), "unlocked_shops", []) or []
+    )
+    for index, shop in enumerate(SHOP_NAMES):
+        global_features[0, seat, 22 + index] = unlocked_shops.count(shop) / 8.0
 
     for relative, farm_index in enumerate((seat, 1 - seat)):
         if farm_index >= len(farms_raw):
