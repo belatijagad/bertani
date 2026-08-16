@@ -207,7 +207,7 @@ class TaskRule(Protocol):
 
 
 class TaskScheduler:
-    """Assign exclusive tasks to units by priority, eligibility, and distance."""
+    """Assign urgency tiers using minimum-distance unit/task pairs."""
 
     def __init__(self, board_size: int, shed_capacity: int = 100) -> None:
         self.board_size = board_size
@@ -256,30 +256,41 @@ class TaskScheduler:
         for environment in range(n):
             for player in range(players):
                 available_units = set(np.flatnonzero(batch.active_units[environment, player]))
-                ordered_tasks = np.flatnonzero(tasks.active[environment, player])
-                ordered_tasks = ordered_tasks[
-                    np.argsort(
-                        -tasks.priority[environment, player, ordered_tasks],
-                        kind="stable",
+                active_tasks = np.flatnonzero(tasks.active[environment, player])
+                priorities = np.unique(
+                    tasks.priority[environment, player, active_tasks]
+                )[::-1]
+                for priority in priorities:
+                    tier_tasks = set(
+                        active_tasks[
+                            tasks.priority[environment, player, active_tasks]
+                            == priority
+                        ].tolist()
                     )
-                ]
-                for task in ordered_tasks:
-                    if not available_units:
-                        break
-                    candidates = np.asarray(sorted(available_units), dtype=np.int64)
-                    candidate_scores = scores[environment, player, candidates, task]
-                    candidate_order = np.argsort(-candidate_scores, kind="stable")
-                    for best_offset in candidate_order:
-                        if not np.isfinite(candidate_scores[best_offset]):
-                            break
-                        unit = int(candidates[best_offset])
-                        assignments.task_index[environment, player, unit] = task
-                        assignments.score[environment, player, unit] = candidate_scores[
-                            best_offset
+                    while available_units and tier_tasks:
+                        candidates = np.asarray(
+                            sorted(available_units), dtype=np.int64
+                        )
+                        candidate_tasks = np.asarray(
+                            sorted(tier_tasks), dtype=np.int64
+                        )
+                        tier_scores = scores[environment, player][
+                            np.ix_(candidates, candidate_tasks)
                         ]
+                        best_flat = int(np.argmax(tier_scores))
+                        best_score = float(tier_scores.flat[best_flat])
+                        if not np.isfinite(best_score):
+                            break
+                        unit_offset, task_offset = np.unravel_index(
+                            best_flat, tier_scores.shape
+                        )
+                        unit = int(candidates[unit_offset])
+                        task = int(candidate_tasks[task_offset])
+                        assignments.task_index[environment, player, unit] = task
+                        assignments.score[environment, player, unit] = best_score
                         available_units.remove(unit)
                         if tasks.exclusive[environment, player, task]:
-                            break
+                            tier_tasks.remove(task)
         return assignments
 
 

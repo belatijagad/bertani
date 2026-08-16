@@ -29,6 +29,10 @@ def test_intent_scales_labor_animals_and_selects_cash_crop() -> None:
     np.testing.assert_array_equal(intent.target_crop_counts[..., Item.WHEAT], 15)
     np.testing.assert_array_equal(intent.target_crop_counts[..., Item.CARROT], 9)
 
+    batch.observation_views.global_features[..., 22 + 2] = 1 / 8
+    intent = policy.plan(batch)
+    np.testing.assert_array_equal(intent.target_hands, 9)
+
 
 def test_agent_expands_and_keeps_twelve_animals_alive() -> None:
     env = VecEnv(1, seed=100, auto_reset=False, weed_spawn_chance=0.0)

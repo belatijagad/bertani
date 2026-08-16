@@ -57,6 +57,20 @@ def test_scheduler_reserves_exclusive_tasks_for_distinct_units() -> None:
     assert len(set(assigned.tolist())) == 2
 
 
+def test_scheduler_chooses_nearest_task_within_an_urgency_tier() -> None:
+    env = VecEnv(1, weed_spawn_chance=0.0)
+    batch = env.reset()
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    mask = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    mask[0, 0, 0, 0] = True
+    mask[0, 0, 4, 4] = True
+    tasks.propose_tiles(TaskKind.WATER, mask, 100.0)
+
+    assignments = TaskScheduler(env.board_size).assign(batch, tasks)
+
+    assert assignments.task_index[0, 0, 0] == 4 * env.board_size + 4
+
+
 def test_custom_rule_extends_policy_without_emitting_raw_actions() -> None:
     class BuildPastureRule:
         def propose(

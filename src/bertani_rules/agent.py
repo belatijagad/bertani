@@ -120,7 +120,15 @@ class IntentPlanner:
         phase = np.full(shape, RulePhase.MIDGAME, dtype=np.int8)
         phase[features.day < 3] = RulePhase.OPENING
         phase[features.day >= liquidation_start] = RulePhase.LIQUIDATION
-        target_hands = np.full(shape, 8, dtype=np.int64)
+        shops = np.rint(
+            batch.observation_views.global_features[..., 22:30] * 8
+        ).astype(np.int64)
+        labor_market = (
+            (shops[..., 5] > 0)
+            | (shops[..., 2] >= 2)
+            | ((features.day < 10) & (shops[..., 2] > 0))
+        )
+        target_hands = np.where(labor_market, 9, 8).astype(np.int64)
         opening_hands = np.array([5, 0, 4], dtype=np.int64)
         opening = features.day < opening_hands.size
         target_hands[opening] = opening_hands[features.day[opening]]
