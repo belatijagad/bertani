@@ -11,11 +11,34 @@ dependencies = [
     "kaggle>=2.2.4",
     # The Rust rules engine is differential-tested against this exact oracle.
     "kaggle-environments==1.32.7",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
 bertani = "bertani:main"
 
+[dependency-groups]
+dev = [
+    "maturin>=1.14.1,<2.0",
+    "pytest>=9.1.1,<10",
+]
+
 [build-system]
-requires = ["uv_build>=0.11.14,<0.12.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/bertani-python/Cargo.toml"
+module-name = "bertani._rust"
+python-source = "src"
+python-packages = ["bertani"]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "crates/**/*.rs" },
+]

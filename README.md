@@ -2,7 +2,7 @@
 
 Fast, reproducible tooling for the [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture) reinforcement-learning competition.
 
-The first milestone is a pure Rust rules engine. It mirrors the advanced Kaggriculture environment while keeping Python and serialization out of the simulation hot path. A Python vector environment and RL-facing observation/action encoders will sit on top of this core after transition parity is locked down.
+Bertani mirrors the advanced Kaggriculture environment in a pure Rust rules engine, then layers a parallel, NumPy-first vector environment on top. Python and serialization stay outside the simulation hot path.
 
 ## Current status
 
@@ -12,6 +12,10 @@ The first milestone is a pure Rust rules engine. It mirrors the advanced Kaggric
 - CPython-compatible Mersenne Twister for exact weed/shop replay behavior
 - Full-state, every-transition differential tests against the installed Python oracle
 - Focused tests for high-risk edge cases
+- Rayon-parallel vector environment exposed through PyO3
+- Reused caller-owned NumPy buffers with player-relative observations and action masks
+- Fixed-shape unit and market actions with slot-exact simultaneous-market behavior
+- Deterministic auto-reset with retained terminal snapshots
 
 The oracle is pinned to `kaggle-environments==1.32.7`. The exact `kaggriculture.py` used during development has SHA-256:
 
@@ -40,18 +44,43 @@ assert_eq!(sim.state.step, 719);
 assert_eq!(sim.reward(0), 3000.0);
 ```
 
+## Use the Python vector environment
+
+```python
+import numpy as np
+
+from bertani import Item, MarketOp, VecEnv
+
+env = VecEnv(num_envs=256, seed=11)
+batch = env.reset()
+
+# Reuse the environment-owned action arrays instead of allocating each step.
+unit_actions, market_actions, market_lengths = env.clear_actions()
+market_actions[:, 0, 0] = (MarketOp.BUY_SEED, Item.CARROT, 1)
+market_lengths[:, 0] = 1
+
+batch = env.step(unit_actions, market_actions, market_lengths)
+assert batch.observations.dtype == np.float32
+assert batch.rewards.shape == (256, 2)
+```
+
+`Batch` arrays and their named views are overwritten by the next `reset` or `step`; copy only values that must survive. The default unit dimension is 231, the exact observable bound implied by the default turn and market-order limits. See [the vector-environment API](docs/vector-environment.md) for layouts, masks, auto-reset semantics, and seeding.
+
 Run validation with:
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+uv run cargo test --workspace
+uv run cargo clippy --workspace --all-targets -- -D warnings
+uv run pytest -q
 ```
 
-Run the two benchmark scopes with:
+Run the benchmark scopes with:
 
 ```bash
 cargo run --release -p kaggriculture-core --example benchmark -- 10000
 uv run python scripts/benchmark_python.py 3
+uv run maturin develop --release
+uv run python scripts/benchmark_vec_env.py
 ```
 
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
@@ -62,13 +91,14 @@ Regenerate the Python reference trace after an intentional oracle update with:
 uv run python scripts/export_reference_trace.py --agents starter,pass --seed 11
 ```
 
-See [the rules-engine notes](docs/rules-engine.md) for the exact transition order, parity contract, and current boundary between the strict Rust core and the future Kaggle/Python compatibility layer.
+See [the rules-engine notes](docs/rules-engine.md) for the exact transition order and parity contract. The fixed-shape training boundary is documented in [the vector-environment API](docs/vector-environment.md).
 
 ## Layout
 
 ```text
 crates/kaggriculture-core/  deterministic Rust simulator
+crates/bertani-python/      PyO3 vector environment and encoders
 scripts/                    Python-oracle fixture generation
-src/bertani/                Python package (RL bindings will live here)
+src/bertani/                typed Python wrapper and NumPy buffer views
 references/                 local competition references; gitignored
 ```

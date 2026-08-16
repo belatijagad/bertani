@@ -88,6 +88,36 @@ impl Crop {
     pub const fn as_str(self) -> &'static str {
         self.product().as_str()
     }
+
+    #[must_use]
+    pub const fn seed_cost(self) -> i64 {
+        CROP_DEFS[self.index()].seed_cost
+    }
+
+    #[must_use]
+    pub const fn first_yield_day(self) -> i32 {
+        CROP_DEFS[self.index()].first_yield_day
+    }
+
+    #[must_use]
+    pub const fn max_yield_day(self) -> i32 {
+        CROP_DEFS[self.index()].max_yield_day
+    }
+
+    #[must_use]
+    pub const fn interval(self) -> i32 {
+        CROP_DEFS[self.index()].interval
+    }
+
+    #[must_use]
+    pub const fn max_yield(self) -> i64 {
+        CROP_DEFS[self.index()].max_yield
+    }
+
+    #[must_use]
+    pub const fn ongoing(self) -> bool {
+        CROP_DEFS[self.index()].ongoing
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -119,6 +149,36 @@ impl Animal {
             Self::Cow => "COW",
             Self::Sheep => "SHEEP",
         }
+    }
+
+    #[must_use]
+    pub const fn cost(self) -> i64 {
+        ANIMAL_DEFS[self.index()].cost
+    }
+
+    #[must_use]
+    pub const fn structure(self) -> Structure {
+        ANIMAL_DEFS[self.index()].structure
+    }
+
+    #[must_use]
+    pub const fn first_yield_day(self) -> i32 {
+        ANIMAL_DEFS[self.index()].first_yield_day
+    }
+
+    #[must_use]
+    pub const fn interval(self) -> i32 {
+        ANIMAL_DEFS[self.index()].interval
+    }
+
+    #[must_use]
+    pub const fn max_held(self) -> i64 {
+        ANIMAL_DEFS[self.index()].max_held
+    }
+
+    #[must_use]
+    pub const fn product(self) -> Product {
+        ANIMAL_DEFS[self.index()].product
     }
 }
 
