@@ -9,6 +9,14 @@ from .vec_env import (
     UnitOp,
     VecEnv,
 )
+from .rule_based import (
+    RuleActions,
+    RuleConfig,
+    RuleFeatures,
+    RulePhase,
+    StrategicIntent,
+    VectorRulePolicy,
+)
 
 __all__ = [
     "Batch",
@@ -16,8 +24,14 @@ __all__ = [
     "MarketOp",
     "MaskViews",
     "ObservationViews",
+    "RuleActions",
+    "RuleConfig",
+    "RuleFeatures",
+    "RulePhase",
+    "StrategicIntent",
     "UnitOp",
     "VecEnv",
+    "VectorRulePolicy",
 ]
 
 

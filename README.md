@@ -66,6 +66,13 @@ assert batch.rewards.shape == (256, 2)
 
 `Batch` arrays and their named views are overwritten by the next `reset` or `step`; copy only values that must survive. The default unit dimension is 231, the exact observable bound implied by the default turn and market-order limits. See [the vector-environment API](docs/vector-environment.md) for layouts, masks, auto-reset semantics, and seeding.
 
+Rule-based policies can use the same batched boundary. `VectorRulePolicy`
+extracts features and evaluates strategic rules across every environment with
+NumPy, then serializes masked actions through a reusable executor. Its intent
+planner is replaceable, so a learned planner can later retain deterministic
+legality, logistics, and action encoding. See
+[the rule-based agent architecture](docs/rule-based-agent.md).
+
 Run validation with:
 
 ```bash
