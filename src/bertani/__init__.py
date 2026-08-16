@@ -1,5 +1,6 @@
 """Fast Rust tooling for the Kaggriculture reinforcement-learning competition."""
 
+from .market import MarketPlanBatch, MarketRule
 from .opening import (
     OPENING_BOOK,
     OpeningController,
@@ -23,11 +24,22 @@ from .rule_based import (
     StrategicIntent,
     VectorRulePolicy,
 )
+from .tasks import (
+    MaintenanceTaskRule,
+    TaskAssignments,
+    TaskBatch,
+    TaskExecutor,
+    TaskKind,
+    TaskRule,
+    TaskScheduler,
+)
 
 __all__ = [
     "Batch",
     "Item",
     "MarketOp",
+    "MarketPlanBatch",
+    "MarketRule",
     "MaskViews",
     "ObservationViews",
     "OPENING_BOOK",
@@ -39,6 +51,13 @@ __all__ = [
     "RuleFeatures",
     "RulePhase",
     "StrategicIntent",
+    "MaintenanceTaskRule",
+    "TaskAssignments",
+    "TaskBatch",
+    "TaskExecutor",
+    "TaskKind",
+    "TaskRule",
+    "TaskScheduler",
     "UnitOp",
     "VecEnv",
     "VectorRulePolicy",

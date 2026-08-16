@@ -68,9 +68,11 @@ assert batch.rewards.shape == (256, 2)
 
 Rule-based policies can use the same batched boundary. `VectorRulePolicy`
 extracts features and evaluates strategic rules across every environment with
-NumPy, then serializes masked actions through a reusable executor. Its intent
-planner is replaceable, so a learned planner can later retain deterministic
-legality, logistics, and action encoding. See
+NumPy, arbitrates typed `TaskBatch` objectives, assigns units, and serializes
+masked actions through a reusable executor. Ordered `MarketPlanBatch` objects
+track market actions and resource reservations. The intent planner is
+replaceable, so a learned planner can later retain deterministic legality,
+logistics, and action encoding. See
 [the rule-based agent architecture](docs/rule-based-agent.md).
 
 Run validation with:

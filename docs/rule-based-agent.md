@@ -14,7 +14,9 @@ been batched.
 VecEnv Batch
     -> batched feature extraction
     -> StrategicIntent (rules now, learned planner later)
-    -> masked deterministic executor
+    -> TaskRule proposals
+    -> TaskScheduler assignments
+    -> masked TaskExecutor
     -> VecEnv action tensors
 ```
 
@@ -34,21 +36,81 @@ advancing the tape. `last_opening_diagnostics` exposes per-seat `active`,
 `finished`, `recovering`, and `invalid_nominal_action` arrays after every
 `act()` call.
 
-Outside the opening, the initial executor is intentionally conservative. It
-performs useful actions available on each unit's current tile, in this priority
-order:
+Outside the opening, rules no longer emit raw simulator actions. They write
+typed objectives into a fixed-capacity `TaskBatch`. The first `B*B` slots map
+directly to board tiles and extra slots represent global logistics work. A task
+contains:
 
-1. harvest;
-2. feed;
+- `TaskKind` and target coordinates;
+- optional item and quantity;
+- priority, deadline, and estimated value;
+- required inventory item/count;
+- whether the task must be assigned exclusively.
+
+Rules may compete for the same tile. `TaskBatch.propose_tiles()` retains the
+highest-priority proposal, making arbitration independent of rule ordering when
+priorities differ. `TaskBatch.set_global()` adds named logistics tasks without
+inventing fake board tiles.
+
+The default `MaintenanceTaskRule` proposes work in this priority order:
+
+1. feed;
+2. harvest;
 3. water;
 4. collect fertilizer;
-5. care;
-6. drop carried inventory;
-7. pass.
+5. care.
 
-It also sells shed products during liquidation. It never assigns a generic
-`DIG`, because the action mask allows digging plants as well as weeds and a
-context-free priority could destroy a healthy crop.
+If animals need food and the carried wheat is insufficient, it also proposes a
+`FETCH_ITEM(WHEAT)` prerequisite at the shed. The policy replans every turn, so
+the inferred workflow naturally progresses from fetch, through movement, to
+feed without persisting a brittle imperative script.
+
+`TaskScheduler` computes batched priority-minus-distance scores, checks required
+inventory, and then performs a small per-seat conflict-resolution loop. Each
+unit receives at most one task and exclusive tasks receive at most one unit.
+`TaskExecutor` handles Manhattan movement, local action masks, item arguments,
+and raw tensor serialization. This is the main extension seam: a new rule only
+needs to propose tasks.
+
+For example:
+
+```python
+class BuildPastureRule:
+    def propose(self, batch, intent, tasks):
+        candidates = ...  # bool[N, 2, B, B]
+        tasks.propose_tiles(
+            TaskKind.BUILD_PASTURE,
+            candidates,
+            priority=250.0,
+        )
+
+policy = VectorRulePolicy(task_rules=(MaintenanceTaskRule(), BuildPastureRule()))
+```
+
+The `intent` argument lets production rules respond to the current strategic
+targets without coupling those targets to movement or action encoding.
+
+The executor also sells shed products during liquidation. The maintenance rule
+does not propose generic weed clearing yet, because clearing every weed has an
+opportunity cost; opening recovery explicitly clears only the blocking pasture
+weed.
+
+Market rules use a separate `MarketPlanBatch`. `append()` preserves order and
+the active-prefix length required by simultaneous market processing. Rules can
+reserve cash or shed items before later rules append purchases or sales, and an
+overflow flag records when proposals exceed the configured order limit. This
+keeps order sequencing and shared-resource arbitration out of raw action-array
+code.
+
+```python
+class OpeningHireRule:
+    def propose(self, batch, intent, plan):
+        selected = intent.phase == RulePhase.OPENING
+        plan.reserve_cash(selected, 100)
+        plan.append(selected, MarketOp.HIRE)
+
+policy = VectorRulePolicy(market_rules=(OpeningHireRule(),))
+```
 
 Use it with the vector environment:
 
@@ -76,9 +138,10 @@ actions they need to retain.
 
 The scaffold is not yet a competitive baseline. The next layers are:
 
-- a task map for watering, feeding, care, harvesting, weeds, and structures;
-- deterministic unit-to-task assignment and shortest-path movement;
-- inventory logistics around the shed;
+- crop planting and livestock expansion rules driven by `StrategicIntent`;
+- animal placement, fertilizer, deposit, and harvest-to-shed workflows;
+- deadline-aware scheduling when the current workforce cannot finish all work;
+- joint cash/item reservations across field tasks and market plans;
 - market-order construction from reserves, targets, prices, and remaining time;
 - batch benchmarks and replay comparisons against the observed opening.
 

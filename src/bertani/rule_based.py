@@ -16,8 +16,17 @@ from enum import IntEnum
 import numpy as np
 from numpy.typing import NDArray
 
+from .market import MarketPlanBatch, MarketRule
 from .opening import OpeningController, OpeningDiagnostics
-from .vec_env import Batch, Item, MarketOp, UnitOp
+from .tasks import (
+    MaintenanceTaskRule,
+    TaskAssignments,
+    TaskBatch,
+    TaskExecutor,
+    TaskRule,
+    TaskScheduler,
+)
+from .vec_env import Batch, Item, MarketOp
 
 
 Int8Array = NDArray[np.int8]
@@ -106,35 +115,13 @@ class VectorRulePolicy:
     rules to the simulator or to a neural-network implementation.
     """
 
-    _LOCAL_OPERATION_PRIORITY = np.array(
-        [
-            1,  # PASS
-            0,  # NORTH
-            0,  # SOUTH
-            0,  # EAST
-            0,  # WEST
-            0,  # PICKUP
-            50,  # DROP
-            0,  # PLACE
-            0,  # PLANT
-            90,  # WATER
-            100,  # HARVEST
-            0,  # FERTILIZE
-            0,  # DIG -- never destroy a crop through a generic priority
-            0,  # BUILD_COOP
-            0,  # BUILD_PASTURE
-            95,  # FEED
-            80,  # COLLECT_FERTILIZER
-            70,  # CARE
-        ],
-        dtype=np.int16,
-    )
-
     def __init__(
         self,
         config: RuleConfig | None = None,
         intent_planner: Callable[[Batch], StrategicIntent] | None = None,
         use_opening: bool = True,
+        task_rules: tuple[TaskRule, ...] | None = None,
+        market_rules: tuple[MarketRule, ...] | None = None,
     ) -> None:
         self.config = config or RuleConfig()
         self.intent_planner = intent_planner
@@ -142,8 +129,24 @@ class VectorRulePolicy:
             OpeningController(self.config.episode_steps) if use_opening else None
         )
         self.last_opening_diagnostics: OpeningDiagnostics | None = None
+        self.task_rules = (
+            (
+                MaintenanceTaskRule(
+                    turns_per_day=self.config.turns_per_day,
+                    shed_capacity=self.config.shed_capacity,
+                ),
+            )
+            if task_rules is None
+            else task_rules
+        )
+        self.market_rules = () if market_rules is None else market_rules
+        self._task_scheduler: TaskScheduler | None = None
+        self._task_executor: TaskExecutor | None = None
+        self.last_tasks: TaskBatch | None = None
+        self.last_assignments: TaskAssignments | None = None
         self._shape: tuple[int, int, int, int] | None = None
         self._actions: RuleActions | None = None
+        self.last_market_plan: MarketPlanBatch | None = None
 
     def extract_features(self, batch: Batch) -> RuleFeatures:
         """Extract planner features with batch-wide NumPy operations."""
@@ -238,25 +241,49 @@ class VectorRulePolicy:
     def act(self, batch: Batch, max_orders: int = 10) -> RuleActions:
         """Return legal local maintenance actions for an entire batch.
 
-        ``plan`` is called even though the first executor only consumes the
-        liquidation flag. This keeps one stable seam for upcoming opening,
-        routing, and economy rules and for a later neural strategy module.
+        Opening-only batches take a fast path around task generation. Outside
+        the opening, rules propose tasks, the scheduler assigns units, and the
+        executor emits masked movement or interaction actions.
         """
+
+        actions = self._action_buffers(batch, max_orders)
+        actions.unit_actions.fill(0)
+        assert self.last_market_plan is not None
+        self.last_market_plan.clear()
+
+        if (
+            self.opening_controller is not None
+            and self.opening_controller.active_mask(batch).all()
+        ):
+            self.last_opening_diagnostics = self.opening_controller.apply(
+                batch,
+                actions.unit_actions,
+                actions.market_actions,
+                actions.market_lengths,
+            )
+            self.last_tasks = None
+            self.last_assignments = None
+            return actions
 
         intent = self.plan(batch)
         features = self.extract_features(batch)
-        actions = self._action_buffers(batch, max_orders)
-        actions.unit_actions.fill(0)
-        actions.market_actions.fill(0)
-        actions.market_lengths.fill(0)
 
-        masks = batch.mask_views.unit_ops
-        scores = masks * self._LOCAL_OPERATION_PRIORITY
-        chosen = np.argmax(scores, axis=-1)
-        chosen[~batch.active_units] = int(UnitOp.PASS)
-        actions.unit_actions[..., 0] = chosen
+        tasks = self._task_buffers(batch)
+        tasks.clear()
+        for rule in self.task_rules:
+            rule.propose(batch, intent, tasks)
+        assert self._task_scheduler is not None
+        assert self._task_executor is not None
+        assignments = self._task_scheduler.assign(batch, tasks)
+        self._task_executor.execute(
+            batch, tasks, assignments, actions.unit_actions
+        )
+        self.last_tasks = tasks
+        self.last_assignments = assignments
 
-        self._append_liquidation_sales(features, intent, actions)
+        for rule in self.market_rules:
+            rule.propose(batch, intent, self.last_market_plan)
+        self._append_liquidation_sales(features, intent, self.last_market_plan)
         if self.opening_controller is not None:
             self.last_opening_diagnostics = self.opening_controller.apply(
                 batch,
@@ -267,6 +294,18 @@ class VectorRulePolicy:
         else:
             self.last_opening_diagnostics = None
         return actions
+
+    def _task_buffers(self, batch: Batch) -> TaskBatch:
+        n, players, _ = batch.active_units.shape
+        board_size = batch.observation_views.tiles.shape[3]
+        expected_shape = (n, players, board_size * board_size + 12)
+        if self.last_tasks is None or self.last_tasks.active.shape != expected_shape:
+            self.last_tasks = TaskBatch.allocate(n, players, board_size)
+            self._task_scheduler = TaskScheduler(
+                board_size, shed_capacity=self.config.shed_capacity
+            )
+            self._task_executor = TaskExecutor(board_size)
+        return self.last_tasks
 
     def _action_buffers(self, batch: Batch, max_orders: int) -> RuleActions:
         n, players, units = batch.active_units.shape
@@ -279,6 +318,13 @@ class VectorRulePolicy:
                 ),
                 market_lengths=np.zeros((n, players), dtype=np.int64),
             )
+            self.last_market_plan = MarketPlanBatch(
+                actions=self._actions.market_actions,
+                lengths=self._actions.market_lengths,
+                reserved_cash=np.zeros((n, players), dtype=np.float64),
+                reserved_items=np.zeros((n, players, 12), dtype=np.int64),
+                overflow=np.zeros((n, players), dtype=np.bool_),
+            )
             self._shape = shape
         return self._actions
 
@@ -286,7 +332,7 @@ class VectorRulePolicy:
         self,
         features: RuleFeatures,
         intent: StrategicIntent,
-        actions: RuleActions,
+        plan: MarketPlanBatch,
     ) -> None:
         """Serialize ragged sell orders after vectorized eligibility checks."""
 
@@ -295,18 +341,13 @@ class VectorRulePolicy:
         # be sold directly. This tiny ragged loop is intentionally isolated in
         # the executor; the expensive state evaluation remains batched.
         sellable = (shed[..., :9] > 0) & intent.liquidate[..., None]
-        for environment, player in np.argwhere(sellable.any(axis=-1)):
-            order = 0
-            for item in np.flatnonzero(sellable[environment, player]):
-                if order >= actions.market_actions.shape[2]:
-                    break
-                actions.market_actions[environment, player, order] = (
-                    MarketOp.SELL,
-                    item,
-                    shed[environment, player, item],
-                )
-                order += 1
-            actions.market_lengths[environment, player] = order
+        for item in range(9):
+            plan.append(
+                sellable[..., item],
+                MarketOp.SELL,
+                item=item,
+                count=shed[..., item],
+            )
 
 
 def animal_counts_total(animal_counts: Int64Array) -> Int64Array:

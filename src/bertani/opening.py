@@ -135,10 +135,7 @@ class OpeningController:
         """Overwrite actions for seats whose current step is in the opening."""
 
         self._validate_shapes(batch, unit_actions, market_actions, market_lengths)
-        step = np.rint(
-            batch.observation_views.global_features[..., 0]
-            * (self.episode_steps - 1)
-        ).astype(np.int64)
+        step = self.steps(batch)
         active = step < len(OPENING_BOOK)
         finished = ~active
         recovering = np.zeros_like(active)
@@ -173,6 +170,19 @@ class OpeningController:
         self._repair_pasture(batch, step, active, recovering, unit_actions)
         self._mark_invalid_unit_actions(batch, active, unit_actions, invalid)
         return OpeningDiagnostics(active, finished, recovering, invalid)
+
+    def steps(self, batch: Batch) -> NDArray[np.int64]:
+        """Recover integer simulator steps from the normalized batch clock."""
+
+        return np.rint(
+            batch.observation_views.global_features[..., 0]
+            * (self.episode_steps - 1)
+        ).astype(np.int64)
+
+    def active_mask(self, batch: Batch) -> NDArray[np.bool_]:
+        """Return seats still controlled by the opening."""
+
+        return self.steps(batch) < len(OPENING_BOOK)
 
     def _repair_pasture(
         self,
