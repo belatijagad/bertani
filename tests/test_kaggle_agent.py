@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from kaggle_environments import make
 
-from bertani.kaggle_agent import agent
+from bertani_rules.v1 import build_policy
+from bertani.kaggle_agent import make_agent
+
+
+agent = make_agent(build_policy)
 
 
 def test_kaggle_adapter_emits_the_opening_controller_action() -> None:

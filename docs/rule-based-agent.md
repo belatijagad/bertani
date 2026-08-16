@@ -8,7 +8,8 @@ as assigning a varying number of hands to a varying number of farm tasks may
 still use a small per-environment loop after the expensive state evaluation has
 been batched.
 
-`bertani.VectorRulePolicy` establishes three boundaries:
+`bertani.VectorRulePolicy` establishes three boundaries. It remains
+strategy-free unless task and market rules are passed to it:
 
 ```text
 VecEnv Batch
@@ -21,11 +22,27 @@ VecEnv Batch
 ```
 
 `StrategicIntent` contains phase, hiring targets, cash and wheat reserves,
-crop/animal targets, and liquidation flags. The default rules identify the
-observed three-day opening, a midgame, and the final liquidation window. A
-custom callable passed as `intent_planner=` can replace those strategic rules
-without replacing action legality and serialization. Pass `use_opening=False`
-to train or evaluate a planner from the initial state without the opening book.
+crop/animal targets, and liquidation flags. `VectorRulePolicy` supplies a
+neutral no-op intent by default. V1 supplies its opening, midgame, workforce,
+production, reserve, and liquidation choices through `V1IntentPlanner`. A
+custom callable passed as `intent_planner=` changes strategy without replacing
+action legality and serialization. Version factories may offer
+`use_opening=False` to train or evaluate from the initial state.
+
+## Version boundaries
+
+All V1 decisions are colocated in `src/bertani_rules/v1.py`:
+
+- the 72-turn opening book and its pasture-recovery parameters;
+- phase, workforce, reserve, crop, animal, and liquidation targets;
+- maintenance, production, logistics, and market rule classes;
+- `build_policy()`, which composes V1 on the reusable engine.
+
+`src/bertani/` contains only reusable representations, feature extraction,
+opening-book execution, task arbitration, scheduling, action serialization,
+the Kaggle observation adapter, and the vector environment wrapper. A new
+version should copy `v1.py` to `v2.py` and change decisions there, without
+editing the abstraction package.
 
 The opening controller owns steps 0–71 (days 0–2). Its nominal action book is
 the sequence observed in submission `55463512`, but it inspects the planned
@@ -52,7 +69,8 @@ highest-priority proposal, making arbitration independent of rule ordering when
 priorities differ. `TaskBatch.set_global()` adds named logistics tasks without
 inventing fake board tiles.
 
-The default `MaintenanceTaskRule` proposes work in this priority order:
+The V1 strategy in `src/bertani_rules/v1.py` defines a
+`MaintenanceTaskRule` that proposes work in this priority order:
 
 1. feed;
 2. harvest;
@@ -84,16 +102,23 @@ class BuildPastureRule:
             priority=250.0,
         )
 
+from bertani_rules.v1 import MaintenanceTaskRule
+
 policy = VectorRulePolicy(task_rules=(MaintenanceTaskRule(), BuildPastureRule()))
 ```
 
 The `intent` argument lets production rules respond to the current strategic
 targets without coupling those targets to movement or action encoding.
 
-The executor also sells shed products during liquidation. The maintenance rule
-does not propose generic weed clearing yet, because clearing every weed has an
-opportunity cost; opening recovery explicitly clears only the blocking pasture
-weed.
+V1's `ProductionTaskRule` fills the observed wheat/melon footprint after harvest,
+clears weeds that obstruct future production, and routes units carrying
+harvests or fertilizer back to the nearest shed access tile. One-time crops are
+harvested on their maximum-yield day rather than at first maturity.
+
+V1's `EconomyMarketRule` sells deposited products when their price is healthy or
+the shed is under pressure, protects the livestock wheat reserve, buys missing
+feed and replacement seeds, and hires toward the daily workforce target. The
+executor sells every remaining shed product during liquidation.
 
 Market rules use a separate `MarketPlanBatch`. `append()` preserves order and
 the active-prefix length required by simultaneous market processing. Rules can
@@ -115,10 +140,11 @@ policy = VectorRulePolicy(market_rules=(OpeningHireRule(),))
 Use it with the vector environment:
 
 ```python
-from bertani import VecEnv, VectorRulePolicy
+from bertani import VecEnv
+from bertani_rules.v1 import build_policy
 
 env = VecEnv(num_envs=256, seed=11)
-policy = VectorRulePolicy()  # Opening controller enabled by default.
+policy = build_policy()  # Opening controller enabled by default.
 batch = env.reset()
 
 while True:
@@ -138,8 +164,8 @@ actions they need to retain.
 
 The scaffold is not yet a competitive baseline. The next layers are:
 
-- crop planting and livestock expansion rules driven by `StrategicIntent`;
-- animal placement, fertilizer, deposit, and harvest-to-shed workflows;
+- livestock and land expansion rules driven by `StrategicIntent`;
+- animal placement and crop fertilization workflows;
 - deadline-aware scheduling when the current workforce cannot finish all work;
 - joint cash/item reservations across field tasks and market plans;
 - market-order construction from reserves, targets, prices, and remaining time;

@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import statistics
+import sys
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -54,7 +55,14 @@ def load_agent(path: Path, tag: str) -> Agent:
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load agent module: {resolved}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Kaggle archives commonly keep helper packages beside root main.py.
+    # Mirror the competition loader while executing that entry point.
+    module_directory = str(resolved.parent)
+    sys.path.insert(0, module_directory)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(module_directory)
     agent = getattr(module, "agent", None)
     if not callable(agent):
         raise TypeError(f"{resolved} does not define a callable agent")
@@ -157,8 +165,11 @@ def run_pairs(
         )
         pairs.append(pair)
         print(
-            f"seed={seed}  A@0={first.a_margin:+.0f}  "
-            f"A@1={second.a_margin:+.0f}  paired={pair.paired_margin:+.0f}"
+            f"seed={seed}  "
+            f"A@0={first.a_reward:.0f}:{first.b_reward:.0f} "
+            f"({first.a_margin:+.0f})  "
+            f"A@1={second.a_reward:.0f}:{second.b_reward:.0f} "
+            f"({second.a_margin:+.0f})  paired={pair.paired_margin:+.0f}"
         )
     return pairs
 
@@ -252,4 +263,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from .vec_env import Batch, MarketOp
+from .vec_env import Batch, Item, MarketOp
 
 if TYPE_CHECKING:
     from .rule_based import StrategicIntent

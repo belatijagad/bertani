@@ -8,12 +8,14 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import tarfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "bertani"
+RULE_VERSIONS = ROOT / "src" / "bertani_rules"
 DEFAULT_OUTPUT = ROOT / "dist" / "rule_based_submission.tar.gz"
 MODULES = (
     "vec_env.py",
@@ -23,15 +25,37 @@ MODULES = (
     "rule_based.py",
     "kaggle_agent.py",
 )
-MAIN = b'"""Bertani rule-based Kaggriculture submission."""\nfrom bertani_rule.kaggle_agent import agent\n\n__all__ = ["agent"]\n'
-INIT = b'"""Portable Bertani rule-agent package."""\n\nfrom .kaggle_agent import agent\n\n__all__ = ["agent"]\n'
+MAIN = b'''"""Bertani versioned rule-based Kaggriculture submission."""
+from bertani.kaggle_agent import make_agent
+from rule_version import build_policy
+
+agent = make_agent(build_policy)
+
+__all__ = ["agent"]
+'''
+INIT = b'"""Portable Bertani rule-agent abstractions."""\n'
 
 
-def archive_members() -> dict[str, bytes]:
+def archive_members(version: str) -> dict[str, bytes]:
     """Collect the root entry point and its pure-Python dependencies."""
+    if re.fullmatch(r"[a-z][a-z0-9_]*", version) is None:
+        raise ValueError("version must contain lowercase letters, digits, or underscores")
+    version_path = RULE_VERSIONS / f"{version}.py"
+    if not version_path.is_file():
+        available = ", ".join(
+            path.stem
+            for path in sorted(RULE_VERSIONS.glob("*.py"))
+            if path.name != "__init__.py"
+        )
+        raise FileNotFoundError(
+            f"unknown rule version {version!r}; available versions: {available}"
+        )
+    version_payload = version_path.read_bytes()
+    compile(version_payload, str(version_path), "exec")
     members = {
         "main.py": MAIN,
-        "bertani_rule/__init__.py": INIT,
+        "bertani/__init__.py": INIT,
+        "rule_version.py": version_payload,
     }
     for name in MODULES:
         path = SOURCE / name
@@ -39,10 +63,11 @@ def archive_members() -> dict[str, bytes]:
             raise FileNotFoundError(f"required rule-agent module is missing: {path}")
         payload = path.read_bytes()
         compile(payload, str(path), "exec")
-        members[f"bertani_rule/{name}"] = payload
+        members[f"bertani/{name}"] = payload
     manifest = {
         "format": 1,
         "entrypoint": "main.py:agent",
+        "rule_version": version,
         "files": {
             name: hashlib.sha256(payload).hexdigest()
             for name, payload in sorted(members.items())
@@ -54,9 +79,9 @@ def archive_members() -> dict[str, bytes]:
     return members
 
 
-def build_archive(output: Path) -> str:
+def build_archive(output: Path, version: str = "v1") -> str:
     """Write an order-stable, timestamp-free tar.gz and return its SHA-256."""
-    members = archive_members()
+    members = archive_members(version)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as raw:
         with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as zipped:
@@ -76,7 +101,7 @@ def build_archive(output: Path) -> str:
     payload = output.read_bytes()
     with tarfile.open(output, "r:gz") as archive:
         names = archive.getnames()
-        if "main.py" not in names or "bertani_rule/kaggle_agent.py" not in names:
+        if "main.py" not in names or "bertani/kaggle_agent.py" not in names:
             raise RuntimeError("submission archive is missing its entry point or adapter")
         for member in archive.getmembers():
             if not member.isfile():
@@ -87,6 +112,11 @@ def build_archive(output: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--version",
+        default="v1",
+        help="rule version from src/bertani_rules (default: v1)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
@@ -94,8 +124,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     output = args.output.resolve()
-    digest = build_archive(output)
+    digest = build_archive(output, args.version)
     print(f"built {output}")
+    print(f"rule version {args.version}")
     print(f"sha256 {digest}")
 
 

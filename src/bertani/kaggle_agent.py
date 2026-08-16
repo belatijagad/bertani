@@ -8,7 +8,7 @@ does not depend on the Rust simulator extension.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
@@ -25,7 +25,7 @@ QUADRANTS = ("NW", "NE", "SW", "SE")
 UNIT_NAMES = tuple(operation.name for operation in UnitOp)
 MARKET_NAMES = tuple(operation.name for operation in MarketOp)
 
-_POLICIES: dict[int, VectorRulePolicy] = {}
+PolicyFactory = Callable[[RuleConfig], VectorRulePolicy]
 
 
 def _get(value: object, key: str, default: Any = None) -> Any:
@@ -223,27 +223,50 @@ def _market_action(row: np.ndarray[Any, np.dtype[np.int64]]) -> list[object] | N
     return [operation.name, ITEM_NAMES[item], int(row[2])]
 
 
-def agent(obs: object, configuration: object = None) -> dict[str, object]:
-    """Kaggle-compatible entry point backed by the vector rule policy."""
-    seat = 1 if int(_get(obs, "player", 0)) == 1 else 0
-    step = int(_get(obs, "step", 0))
-    if step == 0 or seat not in _POLICIES:
-        _POLICIES[seat] = VectorRulePolicy(_rule_config(configuration))
-    policy = _POLICIES[seat]
-    batch = observation_batch(obs, policy.config)
-    actions = policy.act(batch, max_orders=int(_config_value(configuration, "maxMarketOrdersPerTurn", 10)))
-    unit_rows = actions.unit_actions[0, seat]
-    market_count = int(actions.market_lengths[0, seat])
-    market = [
-        encoded
-        for row in actions.market_actions[0, seat, :market_count]
-        if (encoded := _market_action(row)) is not None
-    ]
-    return {
-        "farmer": _unit_action(unit_rows[0]),
-        "hands": [_unit_action(row) for row in unit_rows[1:]],
-        "market": market,
-    }
+class KaggleAgent:
+    """Stateful Kaggle adapter parameterized by a version's policy factory."""
+
+    def __init__(self, policy_factory: PolicyFactory) -> None:
+        self.policy_factory = policy_factory
+        self.policies: dict[int, VectorRulePolicy] = {}
+
+    def __call__(
+        self, obs: object, configuration: object = None
+    ) -> dict[str, object]:
+        seat = 1 if int(_get(obs, "player", 0)) == 1 else 0
+        step = int(_get(obs, "step", 0))
+        if step == 0 or seat not in self.policies:
+            self.policies[seat] = self.policy_factory(_rule_config(configuration))
+        policy = self.policies[seat]
+        batch = observation_batch(obs, policy.config)
+        actions = policy.act(
+            batch,
+            max_orders=int(
+                _config_value(configuration, "maxMarketOrdersPerTurn", 10)
+            ),
+        )
+        unit_rows = actions.unit_actions[0, seat]
+        market_count = int(actions.market_lengths[0, seat])
+        market = [
+            encoded
+            for row in actions.market_actions[0, seat, :market_count]
+            if (encoded := _market_action(row)) is not None
+        ]
+        return {
+            "farmer": _unit_action(unit_rows[0]),
+            "hands": [_unit_action(row) for row in unit_rows[1:]],
+            "market": market,
+        }
 
 
-__all__ = ["agent", "observation_batch"]
+def make_agent(policy_factory: PolicyFactory) -> KaggleAgent:
+    """Create an isolated Kaggle entry point for one strategy version."""
+    return KaggleAgent(policy_factory)
+
+
+# An opening-only adapter retained as a minimal reusable default. Submission
+# packages replace this with their selected version's build_policy factory.
+agent = make_agent(VectorRulePolicy)
+
+
+__all__ = ["KaggleAgent", "agent", "make_agent", "observation_batch"]

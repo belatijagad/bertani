@@ -206,102 +206,6 @@ class TaskRule(Protocol):
         """Add or replace task proposals using task priorities."""
 
 
-class MaintenanceTaskRule:
-    """Generate survival, collection, harvest, and shed-fetch tasks."""
-
-    def __init__(self, turns_per_day: int = 24, shed_capacity: int = 100) -> None:
-        self.turns_per_day = turns_per_day
-        self.shed_capacity = shed_capacity
-
-    def propose(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-    ) -> None:
-        del intent  # Maintenance depends only on current survival state.
-        tiles = batch.observation_views.tiles[:, :, 0]
-        plants = tiles[..., 3] > 0.5
-        animals = tiles[..., 6:9].sum(axis=-1) > 0.5
-        watered_or_fed = tiles[..., 15] > 0.5
-        cared = tiles[..., 16] > 0.5
-        consecutive_missed = tiles[..., 17] * 2.0
-        harvestable = tiles[..., 23] > 0.5
-        fertilizer_available = tiles[..., 20] > 0.5
-
-        # Lower-priority proposals are installed first; later urgent proposals
-        # win the same tile through TaskBatch's priority arbitration.
-        tasks.propose_tiles(
-            TaskKind.CARE,
-            animals & ~cared,
-            70.0 + 5.0 * consecutive_missed,
-            deadline=self.turns_per_day - 1,
-        )
-        tasks.propose_tiles(
-            TaskKind.COLLECT_FERTILIZER,
-            animals & fertilizer_available,
-            80.0,
-            estimated_value=100.0,
-        )
-        tasks.propose_tiles(
-            TaskKind.WATER,
-            plants & ~watered_or_fed,
-            90.0 + 20.0 * consecutive_missed,
-            deadline=self.turns_per_day - 1,
-        )
-        tasks.propose_tiles(
-            TaskKind.HARVEST,
-            harvestable,
-            100.0,
-        )
-        feed_priority = 110.0 + 30.0 * consecutive_missed
-        needs_feed = animals & ~watered_or_fed
-        tasks.propose_tiles(
-            TaskKind.FEED,
-            needs_feed,
-            feed_priority,
-            deadline=self.turns_per_day - 1,
-            required_item=Item.WHEAT,
-            required_count=1,
-        )
-
-        self._propose_wheat_fetch(batch, tasks, needs_feed, feed_priority)
-
-    def _propose_wheat_fetch(
-        self,
-        batch: Batch,
-        tasks: TaskBatch,
-        needs_feed: NDArray[np.bool_],
-        feed_priority: NDArray[np.float32],
-    ) -> None:
-        views = batch.observation_views
-        units = views.units[:, :, 0]
-        carried_wheat = np.rint(
-            units[..., 5 + int(Item.WHEAT)] * self.shed_capacity
-        ).astype(np.int64)
-        carried_wheat *= batch.active_units
-        available_wheat = np.rint(
-            views.private[..., int(Item.WHEAT)] * self.shed_capacity
-        ).astype(np.int64)
-        feed_count = needs_feed.sum(axis=(2, 3), dtype=np.int64)
-        missing = np.maximum(0, feed_count - carried_wheat.sum(axis=-1))
-        fetch = (missing > 0) & (available_wheat > 0)
-        half = tasks.board_size // 2
-        access = max(0, half - 1)
-        maximum_feed_priority = feed_priority.max(axis=(2, 3)) + 1.0
-        tasks.set_global(
-            0,
-            fetch,
-            TaskKind.FETCH_ITEM,
-            access,
-            access,
-            maximum_feed_priority,
-            item=Item.WHEAT,
-            quantity=np.minimum(missing, available_wheat),
-            deadline=self.turns_per_day - 1,
-        )
-
-
 class TaskScheduler:
     """Assign exclusive tasks to units by priority, eligibility, and distance."""
 
@@ -344,6 +248,9 @@ class TaskScheduler:
             if required.any():
                 enough = inventories[..., item, None] >= tasks.required_count[..., None, :]
                 eligible &= ~required[..., None, :] | enough
+        deposit = tasks.kind == TaskKind.DEPOSIT_INVENTORY
+        carrying_anything = inventories.sum(axis=-1) > 0
+        eligible &= ~deposit[..., None, :] | carrying_anything[..., None]
         scores[~eligible] = -np.inf
 
         for environment in range(n):
@@ -427,6 +334,18 @@ class TaskExecutor:
                     target_y = tasks.target_y[environment, player, task_index]
                     x = unit_x[environment, player, unit]
                     y = unit_y[environment, player, unit]
+                    kind = TaskKind(tasks.kind[environment, player, task_index])
+                    if kind == TaskKind.DEPOSIT_INVENTORY:
+                        half = self.board_size // 2
+                        centers = (max(0, half - 1), half)
+                        if x in centers and y in centers:
+                            if batch.mask_views.unit_ops[
+                                environment, player, unit, UnitOp.DROP
+                            ]:
+                                unit_actions[environment, player, unit, 0] = UnitOp.DROP
+                            continue
+                        target_x = centers[0] if x <= centers[0] else centers[1]
+                        target_y = centers[0] if y <= centers[0] else centers[1]
                     if x != target_x or y != target_y:
                         operation = self._movement(x, y, target_x, target_y)
                         if batch.mask_views.unit_ops[
@@ -435,7 +354,6 @@ class TaskExecutor:
                             unit_actions[environment, player, unit, 0] = operation
                         continue
 
-                    kind = TaskKind(tasks.kind[environment, player, task_index])
                     operation = self._OPERATIONS.get(kind, UnitOp.PASS)
                     item = int(tasks.item[environment, player, task_index])
                     count = int(tasks.quantity[environment, player, task_index])
@@ -468,7 +386,6 @@ class TaskExecutor:
 
 
 __all__ = [
-    "MaintenanceTaskRule",
     "TaskAssignments",
     "TaskBatch",
     "TaskExecutor",

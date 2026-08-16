@@ -5,8 +5,9 @@ import pytest
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
+from bertani_rules.v1 import OPENING_BOOK, build_policy
+
 from bertani import (
-    OPENING_BOOK,
     MarketOp,
     TaskBatch,
     TaskKind,
@@ -71,7 +72,6 @@ def test_custom_rule_extends_policy_without_emitting_raw_actions() -> None:
     env = VecEnv(1, weed_spawn_chance=0.0)
     batch = env.reset()
     policy = VectorRulePolicy(
-        use_opening=False,
         task_rules=(BuildPastureRule(),),
     )
 
@@ -83,7 +83,7 @@ def test_custom_rule_extends_policy_without_emitting_raw_actions() -> None:
 
 def test_post_opening_feed_workflow_fetches_routes_and_feeds() -> None:
     env = VecEnv(1, seed=100, weed_spawn_chance=0.0)
-    policy = VectorRulePolicy()
+    policy = build_policy()
     batch = env.reset()
     for _ in OPENING_BOOK:
         actions = policy.act(batch, max_orders=env.max_orders)

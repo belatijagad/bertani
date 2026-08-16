@@ -1,4 +1,4 @@
-"""Vectorized state-based controller for the observed three-day opening."""
+"""Reusable vectorized controller for version-supplied opening books."""
 
 from __future__ import annotations
 
@@ -31,99 +31,23 @@ class OpeningDiagnostics:
     invalid_nominal_action: NDArray[np.bool_]
 
 
-# Replay steps 1..72 from submission 55463512. Tuple position zero is the
-# action emitted from the initial step-0 observation. Unit slot zero is the
-# farmer; later slots are farm hands in their stable insertion order.
-OPENING_BOOK: tuple[OpeningTurn, ...] = (
-    OpeningTurn(((14, 0, 0),), ((1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (5, 10, 2), (5, 11, 2), (3, 0, 7), (3, 4, 12), (4, 0, 6))),  # 0:00
-    OpeningTurn(((5, 11, 1), (4, 0, 0), (1, 0, 0), (4, 0, 0), (4, 0, 0), (4, 0, 0)), ((6, 0, 3),)),  # 0:01
-    OpeningTurn(((1, 0, 0), (5, 11, 1), (1, 0, 0), (1, 0, 0), (14, 0, 0), (4, 0, 0)), ()),  # 0:02
-    OpeningTurn(((14, 0, 0), (1, 0, 0), (1, 0, 0), (5, 10, 1), (1, 0, 0), (1, 0, 0)), ()),  # 0:03
-    OpeningTurn(((7, 11, 1), (4, 0, 0), (1, 0, 0), (7, 10, 1), (14, 0, 0), (4, 0, 0)), ()),  # 0:04
-    OpeningTurn(((4, 0, 0), (7, 11, 1), (8, 0, 0), (5, 0, 1), (1, 0, 0), (1, 0, 0)), ()),  # 0:05
-    OpeningTurn(((3, 0, 0), (4, 0, 0), (9, 0, 0), (1, 0, 0), (8, 4, 0), (8, 0, 0)), ((4, 0, 2),)),  # 0:06
-    OpeningTurn(((2, 0, 0), (8, 4, 0), (4, 0, 0), (15, 0, 0), (9, 0, 0), (9, 0, 0)), ()),  # 0:07
-    OpeningTurn(((5, 0, 1), (9, 0, 0), (1, 0, 0), (17, 0, 0), (1, 0, 0), (1, 0, 0)), ()),  # 0:08
-    OpeningTurn(((4, 0, 0), (4, 0, 0), (8, 0, 0), (2, 0, 0), (8, 4, 0), (1, 0, 0)), ()),  # 0:09
-    OpeningTurn(((1, 0, 0), (8, 4, 0), (9, 0, 0), (5, 10, 1), (9, 0, 0), (8, 0, 0)), ()),  # 0:10
-    OpeningTurn(((15, 0, 0), (9, 0, 0), (4, 0, 0), (4, 0, 0), (4, 0, 0), (9, 0, 0)), ()),  # 0:11
-    OpeningTurn(((17, 0, 0), (1, 0, 0), (4, 0, 0), (7, 10, 1), (4, 0, 0), (4, 0, 0)), ((4, 0, 1),)),  # 0:12
-    OpeningTurn(((1, 0, 0), (8, 4, 0), (8, 0, 0), (4, 0, 0), (8, 0, 0), (4, 0, 0)), ()),  # 0:13
-    OpeningTurn(((4, 0, 0), (9, 0, 0), (9, 0, 0), (4, 0, 0), (9, 0, 0), (8, 0, 0)), ()),  # 0:14
-    OpeningTurn(((1, 0, 0), (4, 0, 0), (3, 0, 0), (8, 4, 0), (4, 0, 0), (9, 0, 0)), ()),  # 0:15
-    OpeningTurn(((8, 4, 0), (8, 4, 0), (3, 0, 0), (9, 0, 0), (8, 4, 0), (2, 0, 0)), ()),  # 0:16
-    OpeningTurn(((9, 0, 0), (9, 0, 0), (3, 0, 0), (4, 0, 0), (9, 0, 0), (2, 0, 0)), ()),  # 0:17
-    OpeningTurn(((0, 0, 0), (2, 0, 0), (8, 4, 0), (8, 4, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:18
-    OpeningTurn(((0, 0, 0), (8, 4, 0), (9, 0, 0), (9, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:19
-    OpeningTurn(((0, 0, 0), (9, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:20
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:21
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:22
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 0:23
-    OpeningTurn(((5, 0, 3),), ()),  # 1:00
-    OpeningTurn(((15, 0, 0),), ()),  # 1:01
-    OpeningTurn(((4, 0, 0),), ()),  # 1:02
-    OpeningTurn(((15, 0, 0),), ()),  # 1:03
-    OpeningTurn(((17, 0, 0),), ()),  # 1:04
-    OpeningTurn(((1, 0, 0),), ()),  # 1:05
-    OpeningTurn(((15, 0, 0),), ()),  # 1:06
-    OpeningTurn(((17, 0, 0),), ()),  # 1:07
-    OpeningTurn(((3, 0, 0),), ()),  # 1:08
-    OpeningTurn(((2, 0, 0),), ()),  # 1:09
-    OpeningTurn(((17, 0, 0),), ()),  # 1:10
-    OpeningTurn(((16, 0, 0),), ()),  # 1:11
-    OpeningTurn(((1, 0, 0),), ()),  # 1:12
-    OpeningTurn(((16, 0, 0),), ()),  # 1:13
-    OpeningTurn(((4, 0, 0),), ()),  # 1:14
-    OpeningTurn(((16, 0, 0),), ()),  # 1:15
-    OpeningTurn(((3, 0, 0),), ()),  # 1:16
-    OpeningTurn(((2, 0, 0),), ()),  # 1:17
-    OpeningTurn(((7, 8, 3),), ((6, 8, 3), (4, 0, 5))),  # 1:18
-    OpeningTurn(((5, 0, 1),), ()),  # 1:19
-    OpeningTurn(((1, 0, 0),), ()),  # 1:20
-    OpeningTurn(((15, 0, 0),), ()),  # 1:21
-    OpeningTurn(((17, 0, 0),), ()),  # 1:22
-    OpeningTurn(((4, 0, 0),), ()),  # 1:23
-    OpeningTurn(((5, 0, 4),), ((1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0))),  # 2:00
-    OpeningTurn(((15, 0, 0), (4, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0)), ()),  # 2:01
-    OpeningTurn(((17, 0, 0), (4, 0, 0), (4, 0, 0), (1, 0, 0), (16, 0, 0)), ((4, 0, 2),)),  # 2:02
-    OpeningTurn(((1, 0, 0), (16, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 0)), ()),  # 2:03
-    OpeningTurn(((15, 0, 0), (1, 0, 0), (16, 0, 0), (4, 0, 0), (16, 0, 0)), ()),  # 2:04
-    OpeningTurn(((17, 0, 0), (1, 0, 0), (4, 0, 0), (1, 0, 0), (4, 0, 0)), ()),  # 2:05
-    OpeningTurn(((4, 0, 0), (9, 0, 0), (9, 0, 0), (9, 0, 0), (4, 0, 0)), ()),  # 2:06
-    OpeningTurn(((15, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (4, 0, 0)), ()),  # 2:07
-    OpeningTurn(((17, 0, 0), (9, 0, 0), (9, 0, 0), (9, 0, 0), (9, 0, 0)), ((4, 0, 2),)),  # 2:08
-    OpeningTurn(((2, 0, 0), (1, 0, 0), (1, 0, 0), (4, 0, 0), (1, 0, 0)), ()),  # 2:09
-    OpeningTurn(((15, 0, 0), (9, 0, 0), (9, 0, 0), (4, 0, 0), (9, 0, 0)), ()),  # 2:10
-    OpeningTurn(((17, 0, 0), (4, 0, 0), (4, 0, 0), (9, 0, 0), (1, 0, 0)), ()),  # 2:11
-    OpeningTurn(((4, 0, 0), (4, 0, 0), (9, 0, 0), (4, 0, 0), (9, 0, 0)), ()),  # 2:12
-    OpeningTurn(((4, 0, 0), (9, 0, 0), (4, 0, 0), (4, 0, 0), (4, 0, 0)), ()),  # 2:13
-    OpeningTurn(((4, 0, 0), (2, 0, 0), (9, 0, 0), (9, 0, 0), (9, 0, 0)), ()),  # 2:14
-    OpeningTurn(((9, 0, 0), (2, 0, 0), (0, 0, 0), (0, 0, 0), (2, 0, 0)), ()),  # 2:15
-    OpeningTurn(((3, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (9, 0, 0)), ()),  # 2:16
-    OpeningTurn(((3, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:17
-    OpeningTurn(((14, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:18
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:19
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:20
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:21
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:22
-    OpeningTurn(((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), ()),  # 2:23
-)
-
-
 class OpeningController:
     """Apply the opening book across a batch and repair its known weed branch."""
 
-    pasture_x = 2
-    pasture_y = 4
-    pasture_window_start = 66
-
-    def __init__(self, episode_steps: int = 720) -> None:
-        if episode_steps < len(OPENING_BOOK) + 1:
+    def __init__(
+        self,
+        episode_steps: int,
+        book: tuple[OpeningTurn, ...],
+        pasture_recovery: tuple[int, int, int] | None = None,
+    ) -> None:
+        if episode_steps < len(book) + 1:
             raise ValueError(
-                f"episode_steps must be at least {len(OPENING_BOOK) + 1} "
+                f"episode_steps must be at least {len(book) + 1} "
                 "to run the complete opening"
             )
         self.episode_steps = episode_steps
+        self.book = book
+        self.pasture_recovery = pasture_recovery
 
     def apply(
         self,
@@ -136,12 +60,12 @@ class OpeningController:
 
         self._validate_shapes(batch, unit_actions, market_actions, market_lengths)
         step = self.steps(batch)
-        active = step < len(OPENING_BOOK)
+        active = step < len(self.book)
         finished = ~active
         recovering = np.zeros_like(active)
         invalid = np.zeros_like(active)
 
-        for turn_index, turn in enumerate(OPENING_BOOK):
+        for turn_index, turn in enumerate(self.book):
             environments, players = np.nonzero(active & (step == turn_index))
             if environments.size == 0:
                 continue
@@ -182,7 +106,7 @@ class OpeningController:
     def active_mask(self, batch: Batch) -> NDArray[np.bool_]:
         """Return seats still controlled by the opening."""
 
-        return self.steps(batch) < len(OPENING_BOOK)
+        return self.steps(batch) < len(self.book)
 
     def _repair_pasture(
         self,
@@ -192,9 +116,12 @@ class OpeningController:
         recovering: NDArray[np.bool_],
         unit_actions: NDArray[np.int64],
     ) -> None:
-        window = active & (step >= self.pasture_window_start)
+        if self.pasture_recovery is None:
+            return
+        pasture_x, pasture_y, window_start = self.pasture_recovery
+        window = active & (step >= window_start)
         tile = batch.observation_views.tiles[
-            :, :, 0, self.pasture_y, self.pasture_x
+            :, :, 0, pasture_y, pasture_x
         ]
         weed = window & (tile[..., 2] > 0.5)
         empty = window & (tile[..., 0] > 0.5)
@@ -206,7 +133,7 @@ class OpeningController:
             0,
             0,
         )
-        recovering[...] = weed | (empty & (step > self.pasture_window_start))
+        recovering[...] = weed | (empty & (step > window_start))
 
     @staticmethod
     def _mark_invalid_unit_actions(
@@ -242,7 +169,6 @@ class OpeningController:
 
 
 __all__ = [
-    "OPENING_BOOK",
     "OpeningController",
     "OpeningDiagnostics",
     "OpeningTurn",

@@ -5,12 +5,12 @@ import pytest
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
+from bertani_rules.v1 import OPENING_BOOK, build_policy
+
 from bertani import (
-    OPENING_BOOK,
     Item,
     UnitOp,
     VecEnv,
-    VectorRulePolicy,
 )
 
 
@@ -49,7 +49,7 @@ def field_layout(snapshot: dict[str, object], player: int) -> tuple[str, ...]:
 def test_nominal_opening_reaches_the_observed_day_three_position() -> None:
     assert len(OPENING_BOOK) == 72
     env = VecEnv(4, seed=100, weed_spawn_chance=0.0)
-    policy = VectorRulePolicy()
+    policy = build_policy()
     batch = env.reset()
 
     for turn in range(len(OPENING_BOOK)):
@@ -88,7 +88,7 @@ def test_opening_repairs_replay_seed_weed_and_reconverges() -> None:
     # planned pasture at (2, 4). The second slot is a nominal counterexample.
     env = VecEnv(2)
     seeds = np.array([874_717_982, 192_124_1818], dtype=np.uint64)
-    policy = VectorRulePolicy()
+    policy = build_policy()
     batch = env.reset(seeds)
     recovery_actions: list[tuple[int, int]] = []
 

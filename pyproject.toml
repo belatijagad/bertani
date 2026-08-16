@@ -32,7 +32,7 @@ bindings = "pyo3"
 manifest-path = "crates/bertani-python/Cargo.toml"
 module-name = "bertani._rust"
 python-source = "src"
-python-packages = ["bertani"]
+python-packages = ["bertani", "bertani_rules"]
 
 [tool.uv]
 cache-keys = [

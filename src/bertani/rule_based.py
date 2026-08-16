@@ -19,7 +19,6 @@ from numpy.typing import NDArray
 from .market import MarketPlanBatch, MarketRule
 from .opening import OpeningController, OpeningDiagnostics
 from .tasks import (
-    MaintenanceTaskRule,
     TaskAssignments,
     TaskBatch,
     TaskExecutor,
@@ -50,10 +49,10 @@ class RuleConfig:
     turns_per_day: int = 24
     starting_money: int = 3_000
     shed_capacity: int = 100
-    liquidation_days: int = 3
-    opening_crop_targets: tuple[int, int, int, int, int] = (7, 0, 0, 0, 12)
+    liquidation_days: int = 0
+    opening_crop_targets: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
     # GOOSE, COW, SHEEP order.
-    opening_animal_targets: tuple[int, int, int] = (0, 2, 2)
+    opening_animal_targets: tuple[int, int, int] = (0, 0, 0)
 
     def __post_init__(self) -> None:
         if self.episode_steps < 1:
@@ -105,6 +104,42 @@ class RuleActions:
     market_lengths: Int64Array
 
 
+def extract_rule_features(batch: Batch, config: RuleConfig) -> RuleFeatures:
+    """Extract version-neutral dense features from the stable batch layout."""
+
+    views = batch.observation_views
+    global_features = views.global_features
+    own_farms = views.farms[:, :, 0]
+    own_tiles = views.tiles[:, :, 0]
+
+    last_step = max(1, config.episode_steps - 1)
+    step = np.rint(global_features[..., 0] * last_step).astype(np.int64)
+    day = step // config.turns_per_day
+    hour = step % config.turns_per_day
+    money = own_farms[..., 0].astype(np.float64) * config.starting_money
+    crop_counts = np.rint(own_tiles[..., 9:14].sum(axis=(2, 3))).astype(
+        np.int64
+    )
+    animal_counts = np.rint(own_tiles[..., 6:9].sum(axis=(2, 3))).astype(
+        np.int64
+    )
+    shed = np.rint(views.private[..., :12] * config.shed_capacity).astype(
+        np.int64
+    )
+    seeds = np.rint(views.private[..., 12:17] * 10).astype(np.int64)
+    return RuleFeatures(
+        step=step,
+        day=day,
+        hour=hour,
+        money=money,
+        crop_counts=crop_counts,
+        animal_counts=animal_counts,
+        shed=shed,
+        seeds=seeds,
+        market_price_ratios=global_features[..., 5:22:2],
+    )
+
+
 class VectorRulePolicy:
     """Batch-first rule planner with a conservative masked executor.
 
@@ -119,26 +154,15 @@ class VectorRulePolicy:
         self,
         config: RuleConfig | None = None,
         intent_planner: Callable[[Batch], StrategicIntent] | None = None,
-        use_opening: bool = True,
+        opening_controller: OpeningController | None = None,
         task_rules: tuple[TaskRule, ...] | None = None,
         market_rules: tuple[MarketRule, ...] | None = None,
     ) -> None:
         self.config = config or RuleConfig()
         self.intent_planner = intent_planner
-        self.opening_controller = (
-            OpeningController(self.config.episode_steps) if use_opening else None
-        )
+        self.opening_controller = opening_controller
         self.last_opening_diagnostics: OpeningDiagnostics | None = None
-        self.task_rules = (
-            (
-                MaintenanceTaskRule(
-                    turns_per_day=self.config.turns_per_day,
-                    shed_capacity=self.config.shed_capacity,
-                ),
-            )
-            if task_rules is None
-            else task_rules
-        )
+        self.task_rules = () if task_rules is None else task_rules
         self.market_rules = () if market_rules is None else market_rules
         self._task_scheduler: TaskScheduler | None = None
         self._task_executor: TaskExecutor | None = None
@@ -151,91 +175,22 @@ class VectorRulePolicy:
     def extract_features(self, batch: Batch) -> RuleFeatures:
         """Extract planner features with batch-wide NumPy operations."""
 
-        config = self.config
-        views = batch.observation_views
-        global_features = views.global_features
-        own_farms = views.farms[:, :, 0]
-        own_tiles = views.tiles[:, :, 0]
-
-        last_step = max(1, config.episode_steps - 1)
-        step = np.rint(global_features[..., 0] * last_step).astype(np.int64)
-        day = step // config.turns_per_day
-        hour = step % config.turns_per_day
-        money = own_farms[..., 0].astype(np.float64) * config.starting_money
-
-        # Tile channels 9..13 are WHEAT..MELON crop one-hots. Occupied animal
-        # kind channels 6..8 are GOOSE, COW, SHEEP.
-        crop_counts = np.rint(own_tiles[..., 9:14].sum(axis=(2, 3))).astype(
-            np.int64
-        )
-        animal_counts = np.rint(own_tiles[..., 6:9].sum(axis=(2, 3))).astype(
-            np.int64
-        )
-        shed = np.rint(views.private[..., :12] * config.shed_capacity).astype(
-            np.int64
-        )
-        seeds = np.rint(views.private[..., 12:17] * 10).astype(np.int64)
-        market_price_ratios = global_features[..., 5:22:2]
-
-        return RuleFeatures(
-            step=step,
-            day=day,
-            hour=hour,
-            money=money,
-            crop_counts=crop_counts,
-            animal_counts=animal_counts,
-            shed=shed,
-            seeds=seeds,
-            market_price_ratios=market_price_ratios,
-        )
+        return extract_rule_features(batch, self.config)
 
     def plan(self, batch: Batch) -> StrategicIntent:
         """Produce high-level intent for every environment and player."""
 
         if self.intent_planner is not None:
             return self.intent_planner(batch)
-        features = self.extract_features(batch)
-        return self._plan_features(features)
-
-    def _plan_features(self, features: RuleFeatures) -> StrategicIntent:
-        shape = features.step.shape
-        total_days = (
-            self.config.episode_steps + self.config.turns_per_day - 1
-        ) // self.config.turns_per_day
-        liquidation_start = max(0, total_days - self.config.liquidation_days)
-
-        phase = np.full(shape, RulePhase.MIDGAME, dtype=np.int8)
-        phase[features.day < 3] = RulePhase.OPENING
-        phase[features.day >= liquidation_start] = RulePhase.LIQUIDATION
-
-        target_hands = np.full(shape, 5, dtype=np.int64)
-        opening_hands = np.array([5, 0, 4], dtype=np.int64)
-        opening = features.day < opening_hands.size
-        target_hands[opening] = opening_hands[features.day[opening]]
-        target_hands[phase == RulePhase.LIQUIDATION] = 0
-
-        cash_reserve = np.full(shape, 1_000.0, dtype=np.float64)
-        cash_reserve[phase != RulePhase.MIDGAME] = 0.0
-        wheat_reserve = 2 * animal_counts_total(features.animal_counts)
-
-        target_crop_counts = np.broadcast_to(
-            np.asarray(self.config.opening_crop_targets, dtype=np.int64),
-            (*shape, 5),
-        ).copy()
-        target_animal_counts = np.broadcast_to(
-            np.asarray(self.config.opening_animal_targets, dtype=np.int64),
-            (*shape, 3),
-        ).copy()
-        liquidate = phase == RulePhase.LIQUIDATION
-
+        shape = batch.active_units.shape[:2]
         return StrategicIntent(
-            phase=phase,
-            target_hands=target_hands,
-            cash_reserve=cash_reserve,
-            wheat_reserve=wheat_reserve,
-            target_crop_counts=target_crop_counts,
-            target_animal_counts=target_animal_counts,
-            liquidate=liquidate,
+            phase=np.full(shape, RulePhase.MIDGAME, dtype=np.int8),
+            target_hands=np.zeros(shape, dtype=np.int64),
+            cash_reserve=np.zeros(shape, dtype=np.float64),
+            wheat_reserve=np.zeros(shape, dtype=np.int64),
+            target_crop_counts=np.zeros((*shape, 5), dtype=np.int64),
+            target_animal_counts=np.zeros((*shape, 3), dtype=np.int64),
+            liquidate=np.zeros(shape, dtype=np.bool_),
         )
 
     def act(self, batch: Batch, max_orders: int = 10) -> RuleActions:
@@ -363,4 +318,5 @@ __all__ = [
     "RulePhase",
     "StrategicIntent",
     "VectorRulePolicy",
+    "extract_rule_features",
 ]
