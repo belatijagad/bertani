@@ -103,6 +103,16 @@ uv run python scripts/pit_agents.py \
 The preserved V16-RC5 baseline and its provenance are documented in
 [`baselines/v16_rc5/README.md`](baselines/v16_rc5/README.md).
 
+Build the current rule-based policy as a portable Kaggle archive with:
+
+```bash
+uv run python scripts/package_rule_agent.py
+```
+
+This writes `dist/rule_based_submission.tar.gz` with `main.py` at the archive
+root. The bundled observation adapter uses NumPy but does not require the local
+Rust extension.
+
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
 
 Regenerate the Python reference trace after an intentional oracle update with:

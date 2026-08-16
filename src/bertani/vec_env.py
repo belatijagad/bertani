@@ -14,13 +14,25 @@ from typing import Any, Mapping
 import numpy as np
 from numpy.typing import NDArray
 
-from ._rust import (
-    ITEM_COUNT,
-    MARKET_ACTION_COUNT,
-    RL_API_VERSION,
-    UNIT_ACTION_COUNT,
-    NativeVecEnv,
-)
+try:
+    from ._rust import (
+        ITEM_COUNT,
+        MARKET_ACTION_COUNT,
+        RL_API_VERSION,
+        UNIT_ACTION_COUNT,
+        NativeVecEnv,
+    )
+except ModuleNotFoundError as error:
+    if error.name not in {"bertani._rust", f"{__package__}._rust"}:
+        raise
+    # Submission agents need the shared tensor types and stable action IDs but
+    # do not instantiate VecEnv. Keeping those definitions importable lets a
+    # Kaggle archive remain portable without bundling a platform-specific .so.
+    ITEM_COUNT = 12
+    MARKET_ACTION_COUNT = 7
+    RL_API_VERSION = 1
+    UNIT_ACTION_COUNT = 18
+    NativeVecEnv = None  # type: ignore[assignment,misc]
 
 
 class UnitOp(IntEnum):
@@ -209,6 +221,11 @@ class VecEnv:
         town_center_sell_interval: int = 24,
         farm_hand_cost_multiplier: int = 1,
     ) -> None:
+        if NativeVecEnv is None:
+            raise RuntimeError(
+                "VecEnv requires the bertani._rust native extension; "
+                "the pure-Python submission adapter does not"
+            )
         self._native = NativeVecEnv(
             num_envs,
             seed,
