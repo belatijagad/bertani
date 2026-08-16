@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Download recent replays associated with a Kaggle simulation submission."""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import json
+import os
+import random
+import re
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, TypeVar
+
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "inputs" / "replays"
+T = TypeVar("T")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download Kaggle simulation replays into "
+            "inputs/replays/<player name>/ by default."
+        )
+    )
+    parser.add_argument(
+        "submission_id",
+        type=int,
+        help="Kaggle submission ID",
+    )
+    parser.add_argument(
+        "limit",
+        nargs="?",
+        type=positive_int,
+        default=None,
+        help="number of newest episodes to download (default: unlimited)",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
+        help=f"parent output directory (default: {DEFAULT_OUTPUT_ROOT})",
+    )
+    parser.add_argument(
+        "--request-delay",
+        type=non_negative_float,
+        default=1.0,
+        metavar="SECONDS",
+        help="minimum delay between Kaggle API requests (default: 1.0)",
+    )
+    parser.add_argument(
+        "--retries",
+        type=non_negative_int,
+        default=6,
+        help="retries for rate limits and transient errors (default: 6)",
+    )
+    parser.add_argument(
+        "--base-backoff",
+        type=positive_float,
+        default=2.0,
+        metavar="SECONDS",
+        help="initial exponential retry delay (default: 2.0)",
+    )
+    parser.add_argument(
+        "--max-backoff",
+        type=positive_float,
+        default=60.0,
+        metavar="SECONDS",
+        help="maximum exponential retry delay (default: 60.0)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="download replay files again when they already exist",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be downloaded without writing files",
+    )
+    return parser.parse_args()
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
+class RequestPacer:
+    def __init__(self, minimum_delay: float) -> None:
+        self.minimum_delay = minimum_delay
+        self.last_request_at: float | None = None
+
+    def wait(self) -> None:
+        if self.last_request_at is not None:
+            elapsed = time.monotonic() - self.last_request_at
+            time.sleep(max(0.0, self.minimum_delay - elapsed))
+        self.last_request_at = time.monotonic()
+
+
+def response_from_error(error: Exception) -> Any | None:
+    return getattr(error, "response", None)
+
+
+def retry_after_seconds(error: Exception) -> float | None:
+    response = response_from_error(error)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def is_retryable(error: Exception) -> bool:
+    response = response_from_error(error)
+    status = getattr(response, "status_code", None)
+    return status is None or status == 429 or 500 <= status < 600
+
+
+def with_retries(
+    operation: Callable[[], T],
+    description: str,
+    pacer: RequestPacer,
+    retries: int,
+    base_backoff: float,
+    max_backoff: float,
+) -> T:
+    for attempt in range(retries + 1):
+        pacer.wait()
+        try:
+            return operation()
+        except Exception as error:
+            if attempt == retries or not is_retryable(error):
+                raise
+            exponential = min(max_backoff, base_backoff * (2**attempt))
+            server_delay = retry_after_seconds(error) or 0.0
+            delay = max(server_delay, exponential + random.uniform(0, exponential * 0.25))
+            print(
+                f"{description} was rate-limited or failed temporarily; "
+                f"retrying in {delay:.1f}s ({attempt + 1}/{retries})...",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    raise AssertionError("retry loop exhausted unexpectedly")
+
+
+def safe_directory_name(name: str) -> str:
+    """Keep Unicode player names while excluding path/control characters."""
+    cleaned = re.sub(r"[\\/\x00-\x1f\x7f]", "_", name).strip().strip(".")
+    return cleaned or "unknown-player"
+
+
+def target_agent(episode: Any, submission_id: int) -> Any | None:
+    return next(
+        (
+            agent
+            for agent in (getattr(episode, "agents", None) or [])
+            if agent.submission_id == submission_id
+        ),
+        None,
+    )
+
+
+def episode_manifest_entry(episode: Any, agent: Any) -> dict[str, Any]:
+    return {
+        "episode_id": episode.id,
+        "created_at": episode.create_time.isoformat(),
+        "ended_at": episode.end_time.isoformat() if episode.end_time else None,
+        "type": episode.type.name,
+        "target_agent_index": agent.index,
+        "target_reward": agent.reward,
+        "opponents": [
+            {
+                "team_name": other.team_name,
+                "submission_id": other.submission_id,
+                "agent_index": other.index,
+                "reward": other.reward,
+            }
+            for other in (getattr(episode, "agents", None) or [])
+            if other.submission_id != agent.submission_id
+        ],
+    }
+
+
+def download_atomically(api: KaggleApi, episode_id: int, destination: Path) -> None:
+    """Avoid leaving a replay that looks complete after an interrupted download."""
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary_dir:
+        api.competition_episode_replay(episode_id, temporary_dir, quiet=True)
+        downloaded = Path(temporary_dir) / f"episode-{episode_id}-replay.json"
+        os.replace(downloaded, destination)
+
+
+def main() -> int:
+    args = parse_args()
+    api = KaggleApi()
+    pacer = RequestPacer(args.request_delay)
+
+    try:
+        episodes = list(
+            with_retries(
+                lambda: api.competition_list_episodes(args.submission_id),
+                "Episode listing",
+                pacer,
+                args.retries,
+                args.base_backoff,
+                args.max_backoff,
+            )
+        )
+    except Exception as error:
+        print(f"Could not list episodes: {error}", file=sys.stderr)
+        return 1
+
+    associated = [
+        (episode, target_agent(episode, args.submission_id)) for episode in episodes
+    ]
+    associated = [(episode, agent) for episode, agent in associated if agent is not None]
+    if not associated:
+        print(
+            f"No episodes associated with submission {args.submission_id} were found.",
+            file=sys.stderr,
+        )
+        return 1
+
+    player_names = {agent.team_name for _, agent in associated}
+    if len(player_names) != 1:
+        print(
+            "Kaggle returned multiple player names for the submission: "
+            + ", ".join(sorted(player_names)),
+            file=sys.stderr,
+        )
+        return 1
+
+    player_name = player_names.pop()
+    output_dir = args.output_root.expanduser().resolve() / safe_directory_name(player_name)
+    selected = associated if args.limit is None else associated[: args.limit]
+
+    print(f"Player: {player_name}")
+    print(f"Submission: {args.submission_id}")
+    print(f"Episodes: {len(selected)} of {len(associated)}")
+    print(f"Output: {output_dir}")
+    if args.dry_run:
+        for episode, agent in selected:
+            print(f"  {episode.id} (agent {agent.index})")
+        return 0
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    downloaded_count = 0
+    skipped_count = 0
+    failures: list[tuple[int, str]] = []
+
+    for position, (episode, _) in enumerate(selected, start=1):
+        replay_path = output_dir / f"episode-{episode.id}-replay.json"
+        if replay_path.exists() and not args.overwrite:
+            skipped_count += 1
+            print(f"[{position}/{len(selected)}] skip {episode.id}")
+            continue
+        print(f"[{position}/{len(selected)}] download {episode.id}")
+        try:
+            with_retries(
+                lambda: download_atomically(api, episode.id, replay_path),
+                f"Replay {episode.id}",
+                pacer,
+                args.retries,
+                args.base_backoff,
+                args.max_backoff,
+            )
+            downloaded_count += 1
+        except Exception as error:
+            failures.append((episode.id, str(error)))
+            print(f"  failed: {error}", file=sys.stderr)
+
+    manifest = {
+        "submission_id": args.submission_id,
+        "player_name": player_name,
+        "episodes": [
+            episode_manifest_entry(episode, agent) for episode, agent in selected
+        ],
+    }
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    print(
+        f"Done: {downloaded_count} downloaded, {skipped_count} skipped, "
+        f"{len(failures)} failed."
+    )
+    if failures:
+        print("Failed episode IDs:", file=sys.stderr)
+        for episode_id, error in failures:
+            print(f"  {episode_id}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
