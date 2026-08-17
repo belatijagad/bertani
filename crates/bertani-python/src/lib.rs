@@ -3,6 +3,7 @@
 mod action;
 mod encoding;
 mod scheduler;
+mod route_scheduler;
 mod snapshot;
 mod vec_env;
 
@@ -15,6 +16,9 @@ mod _rust {
 
     #[pymodule_export]
     use super::scheduler::schedule_tasks;
+
+    #[pymodule_export]
+    use super::route_scheduler::schedule_routes;
 
     #[pymodule_export]
     const UNIT_ACTION_COUNT: usize = super::action::UNIT_ACTION_COUNT;

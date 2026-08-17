@@ -212,11 +212,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--scheduler",
-        choices=("route", "native"),
+        choices=("route", "route-rust", "native"),
         default="route",
         help=(
-            "task scheduler: current route-aware Python planner or the "
-            "existing Rust priority-greedy fast path"
+            "task scheduler: route-aware Python planner, equivalent Rust "
+            "route planner, or existing Rust priority-greedy fast path"
         ),
     )
     parser.add_argument(

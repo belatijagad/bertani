@@ -14,6 +14,11 @@ try:
 except (ImportError, ModuleNotFoundError):
     _native_schedule_tasks = None
 
+try:
+    from ._rust import schedule_routes as _native_schedule_routes
+except (ImportError, ModuleNotFoundError):
+    _native_schedule_routes = None
+
 from .vec_env import Batch, Item, UnitOp
 
 if TYPE_CHECKING:
@@ -321,11 +326,18 @@ class TaskScheduler:
         turns_per_day: int = 24,
         scheduler_mode: str = "route",
     ) -> None:
-        if scheduler_mode not in {"route", "native"}:
-            raise ValueError("scheduler_mode must be 'route' or 'native'")
+        if scheduler_mode not in {"route", "route-rust", "native"}:
+            raise ValueError(
+                "scheduler_mode must be 'route', 'route-rust', or 'native'"
+            )
         if scheduler_mode == "native" and _native_schedule_tasks is None:
             raise RuntimeError(
                 "native scheduler requested but bertani._rust.schedule_tasks is unavailable"
+            )
+        if scheduler_mode == "route-rust" and _native_schedule_routes is None:
+            raise RuntimeError(
+                "route-rust scheduler requested but bertani._rust.schedule_routes "
+                "is unavailable; rebuild the extension with `uv run maturin develop --release`"
             )
         self.scheduler_mode = scheduler_mode
         self.board_size = board_size
@@ -626,6 +638,87 @@ class TaskScheduler:
         self._route_cache_units.clear()
         self._force_replan.clear()
 
+    def _solve_routes_rust(
+        self,
+        *,
+        environment: int,
+        player: int,
+        active_units: NDArray[np.int64],
+        starts_x: NDArray[np.int16],
+        starts_y: NDArray[np.int16],
+        inventories: NDArray[np.int64],
+        tasks: TaskBatch,
+        unit_role: NDArray[np.int16],
+        unit_zone: NDArray[np.int16],
+        task_zone: NDArray[np.int16],
+        role_bonus: float,
+        zone_bonus: float,
+        reserved_by_kind: NDArray[np.int16],
+        hour: int,
+    ) -> list[list[int]]:
+        """Construct the exact route-aware plan in Rust.
+
+        Only the expensive exclusive-task route construction crosses this
+        boundary. Cache validation, non-exclusive logistics, underfoot
+        overrides, assignment scoring, and replan semantics stay in Python so
+        ``route-rust`` can be compared directly with the existing ``route``
+        backend.
+        """
+
+        assert _native_schedule_routes is not None
+        assert self._previous_task is not None
+
+        seat_inventory = np.ascontiguousarray(
+            inventories[environment, player, active_units],
+            dtype=np.int64,
+        )
+        seat_roles = np.ascontiguousarray(
+            unit_role[environment, player, active_units],
+            dtype=np.int16,
+        )
+        seat_zones = np.ascontiguousarray(
+            unit_zone[environment, player, active_units],
+            dtype=np.int16,
+        )
+        previous = np.ascontiguousarray(
+            self._previous_task[environment, player, active_units],
+            dtype=np.int64,
+        )
+
+        raw_routes = _native_schedule_routes(
+            np.ascontiguousarray(starts_x, dtype=np.int16),
+            np.ascontiguousarray(starts_y, dtype=np.int16),
+            seat_inventory,
+            np.ascontiguousarray(tasks.active[environment, player], dtype=np.bool_),
+            np.ascontiguousarray(tasks.exclusive[environment, player], dtype=np.bool_),
+            np.ascontiguousarray(tasks.priority[environment, player], dtype=np.float32),
+            np.ascontiguousarray(tasks.target_x[environment, player], dtype=np.int16),
+            np.ascontiguousarray(tasks.target_y[environment, player], dtype=np.int16),
+            np.ascontiguousarray(tasks.deadline[environment, player], dtype=np.int16),
+            np.ascontiguousarray(tasks.required_item[environment, player], dtype=np.int16),
+            np.ascontiguousarray(tasks.required_count[environment, player], dtype=np.int64),
+            np.ascontiguousarray(tasks.kind[environment, player], dtype=np.int16),
+            np.ascontiguousarray(tasks.work_role[environment, player], dtype=np.int16),
+            seat_roles,
+            seat_zones,
+            np.ascontiguousarray(task_zone[environment, player], dtype=np.int16),
+            np.ascontiguousarray(reserved_by_kind[environment, player], dtype=np.int16),
+            previous,
+            float(role_bonus),
+            float(zone_bonus),
+            float(self.continuity_bonus),
+            int(self.board_size),
+            int(hour),
+            int(self.turns_per_day),
+        )
+
+        routes = [[int(task) for task in route] for route in raw_routes]
+        if len(routes) != active_units.size:
+            raise RuntimeError(
+                "native route solver returned the wrong number of worker routes"
+            )
+        return routes
+
     def _count_cache_miss(self, reason: str) -> None:
         self.cache_miss_reasons[reason] = self.cache_miss_reasons.get(reason, 0) + 1
 
@@ -734,7 +827,24 @@ class TaskScheduler:
         total_length = 0
         total_preference = 0.0
 
-        if exclusive_tasks.size:
+        if exclusive_tasks.size and self.scheduler_mode == "route-rust":
+            routes = self._solve_routes_rust(
+                environment=environment,
+                player=player,
+                active_units=active_units,
+                starts_x=starts_x,
+                starts_y=starts_y,
+                inventories=inventories,
+                tasks=tasks,
+                unit_role=unit_role,
+                unit_zone=unit_zone,
+                task_zone=task_zone,
+                role_bonus=role_bonus,
+                zone_bonus=zone_bonus,
+                reserved_by_kind=reserved_by_kind,
+                hour=hour,
+            )
+        elif exclusive_tasks.size:
             priorities = tasks.priority[
                 environment,
                 player,
@@ -821,66 +931,47 @@ class TaskScheduler:
                         else:
                             other_max = max1
 
-                        for position in range(
-                            first_position,
-                            len(route) + 1,
-                        ):
-                            route_cache = route_eval_cache[local]
-                            if route_cache is None:
-                                route_cache = self._build_route_eval_cache(
-                                    environment=environment,
-                                    player=player,
-                                    start_x=int(starts_x[local]),
-                                    start_y=int(starts_y[local]),
-                                    route=route,
-                                    tasks=tasks,
-                                    hour=hour,
-                                )
-                                route_eval_cache[local] = route_cache
-
-                            candidate_metrics = self._route_metrics_with_insertion_fast(
+                        route_cache = route_eval_cache[local]
+                        if route_cache is None:
+                            route_cache = self._build_route_eval_cache(
                                 environment=environment,
                                 player=player,
-                                worker=worker,
+                                start_x=int(starts_x[local]),
+                                start_y=int(starts_y[local]),
                                 route=route,
-                                route_cache=route_cache,
-                                old_missed=old_missed,
-                                old_length=old_length,
-                                old_preference=old_preference,
-                                insert_task=task,
-                                insert_position=position,
                                 tasks=tasks,
-                                unit_role=unit_role,
-                                unit_zone=unit_zone,
-                                task_zone=task_zone,
-                                role_bonus=role_bonus,
-                                zone_bonus=zone_bonus,
                                 hour=hour,
                             )
+                            route_eval_cache[local] = route_cache
 
-                            cand_missed, cand_length, cand_preference = (
-                                candidate_metrics
-                            )
-
-                            objective = (
-                                total_missed - old_missed + cand_missed,
-                                max(other_max, cand_length),
-                                total_length - old_length + cand_length,
-                                -(
-                                    total_preference
-                                    - old_preference
-                                    + cand_preference
-                                ),
-                            )
-
-                            candidate = (
-                                objective,
-                                local,
-                                position,
-                                candidate_metrics,
-                            )
-                            if best is None or candidate[:3] < best[:3]:
-                                best = candidate
+                        local_best = self._best_insertion_for_worker_fast(
+                            environment=environment,
+                            player=player,
+                            worker=worker,
+                            local=local,
+                            route=route,
+                            route_cache=route_cache,
+                            first_position=first_position,
+                            old_missed=old_missed,
+                            old_length=old_length,
+                            old_preference=old_preference,
+                            insert_task=task,
+                            other_max=other_max,
+                            total_missed=total_missed,
+                            total_length=total_length,
+                            total_preference=total_preference,
+                            tasks=tasks,
+                            unit_role=unit_role,
+                            unit_zone=unit_zone,
+                            task_zone=task_zone,
+                            role_bonus=role_bonus,
+                            zone_bonus=zone_bonus,
+                            hour=hour,
+                        )
+                        if local_best is not None and (
+                            best is None or local_best[:3] < best[:3]
+                        ):
+                            best = local_best
 
                     if best is None:
                         continue
@@ -1622,6 +1713,151 @@ class TaskScheduler:
             elapsed_before=elapsed_before,
             suffix_new_misses=suffix_new_misses,
         )
+
+    def _best_insertion_for_worker_fast(
+        self,
+        *,
+        environment: int,
+        player: int,
+        worker: int,
+        local: int,
+        route: list[int],
+        route_cache: _RouteEvalCache,
+        first_position: int,
+        old_missed: int,
+        old_length: int,
+        old_preference: float,
+        insert_task: int,
+        other_max: int,
+        total_missed: int,
+        total_length: int,
+        total_preference: float,
+        tasks: TaskBatch,
+        unit_role: NDArray[np.int16],
+        unit_zone: NDArray[np.int16],
+        task_zone: NDArray[np.int16],
+        role_bonus: float,
+        zone_bonus: float,
+        hour: int,
+    ) -> tuple[
+        tuple[int, int, int, float],
+        int,
+        int,
+        tuple[int, int, float],
+    ] | None:
+        """Find this worker's best insertion without a Python call per position.
+
+        This is algebraically identical to calling
+        ``_route_metrics_with_insertion_fast`` for every legal insertion
+        position and comparing ``(objective, local, position)``.  Values that
+        are constant across positions (inserted-task coordinates/deadline,
+        worker preference, day overflow baseline) are hoisted out of the inner
+        loop.  This preserves the route scheduler's tie-breaking while reducing
+        the hottest Python call/indexing overhead in a full solve.
+        """
+
+        route_len = len(route)
+        if first_position > route_len:
+            return None
+
+        target_x = tasks.target_x[environment, player]
+        target_y = tasks.target_y[environment, player]
+        deadlines = tasks.deadline[environment, player]
+
+        tx = int(target_x[insert_task])
+        ty = int(target_y[insert_task])
+        deadline = int(deadlines[insert_task])
+
+        preference_add = 0.0
+        worker_role = int(unit_role[environment, player, worker])
+        task_role = int(tasks.work_role[environment, player, insert_task])
+        if worker_role != int(WorkRole.ANY) and worker_role == task_role:
+            preference_add += role_bonus
+
+        worker_zone = int(unit_zone[environment, player, worker])
+        if (
+            worker_zone != int(WorkZone.ANY)
+            and worker_zone == int(task_zone[environment, player, insert_task])
+        ):
+            preference_add += zone_bonus
+
+        if (
+            self._previous_task is not None
+            and insert_task
+            == int(self._previous_task[environment, player, worker])
+        ):
+            preference_add += self.continuity_bonus
+
+        new_preference = old_preference + preference_add
+        objective_preference = -(
+            total_preference - old_preference + new_preference
+        )
+
+        remaining_turns = self.turns_per_day - hour
+        old_overflow = max(0, old_length - remaining_turns)
+        base_deadline_misses = old_missed - old_overflow
+        base_total_missed = total_missed - old_missed
+        base_total_length = total_length - old_length
+
+        prev_x = route_cache.prev_x
+        prev_y = route_cache.prev_y
+        elapsed_before = route_cache.elapsed_before
+        suffix_new_misses = route_cache.suffix_new_misses
+
+        best_key: tuple[tuple[int, int, int, float], int, int] | None = None
+        best_metrics: tuple[int, int, float] | None = None
+        best_position = -1
+
+        # Positions are visited in ascending order.  The original candidate
+        # tuple used position as the final tie-break, so retaining the first
+        # equal objective exactly preserves that behavior.
+        for position in range(first_position, route_len + 1):
+            px = int(prev_x[position])
+            py = int(prev_y[position])
+            to_insert = abs(px - tx) + abs(py - ty)
+
+            if position < route_len:
+                next_task = route[position]
+                nx = int(target_x[next_task])
+                ny = int(target_y[next_task])
+                delta = (
+                    to_insert
+                    + abs(tx - nx)
+                    + abs(ty - ny)
+                    - abs(px - nx)
+                    - abs(py - ny)
+                    + 1
+                )
+            else:
+                delta = to_insert + 1
+
+            cand_length = old_length + delta
+            inserted_completion = int(elapsed_before[position]) + to_insert + 1
+
+            cand_deadline_misses = base_deadline_misses
+            completion_hour = hour + inserted_completion - 1
+            if deadline >= 0 and completion_hour > deadline:
+                cand_deadline_misses += 1
+            cand_deadline_misses += int(suffix_new_misses[position, delta])
+
+            cand_missed = cand_deadline_misses + max(
+                0, cand_length - remaining_turns
+            )
+            objective = (
+                base_total_missed + cand_missed,
+                max(other_max, cand_length),
+                base_total_length + cand_length,
+                objective_preference,
+            )
+            key = (objective, local, position)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_position = position
+                best_metrics = (cand_missed, cand_length, new_preference)
+
+        if best_key is None or best_metrics is None:
+            return None
+        return best_key[0], local, best_position, best_metrics
 
     def _route_metrics_with_insertion_fast(
         self,
