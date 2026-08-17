@@ -6,6 +6,7 @@ mod maintenance_tasks;
 mod market_rule;
 mod production_tasks;
 mod route_scheduler;
+mod scheduler_controller;
 mod snapshot;
 mod vec_env;
 
@@ -27,6 +28,9 @@ mod _rust {
 
     #[pymodule_export]
     use super::route_scheduler::schedule_routes;
+
+    #[pymodule_export]
+    use super::scheduler_controller::NativeTaskScheduler;
 
     #[pymodule_export]
     const UNIT_ACTION_COUNT: usize = super::action::UNIT_ACTION_COUNT;

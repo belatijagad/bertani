@@ -339,165 +339,64 @@ fn best_insertion_for_worker(
     best
 }
 
-#[pyfunction]
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::float_cmp,
-    clippy::needless_pass_by_value,
     clippy::similar_names,
     clippy::too_many_arguments,
     clippy::too_many_lines
 )]
-pub(crate) fn schedule_routes<'py>(
-    starts_x: Bound<'py, PyArray1<i16>>,
-    starts_y: Bound<'py, PyArray1<i16>>,
-    inventories: Bound<'py, PyArray2<i64>>,
-    active_tasks: Bound<'py, PyArray1<bool>>,
-    exclusive: Bound<'py, PyArray1<bool>>,
-    priorities: Bound<'py, PyArray1<f32>>,
-    target_x: Bound<'py, PyArray1<i16>>,
-    target_y: Bound<'py, PyArray1<i16>>,
-    deadlines: Bound<'py, PyArray1<i16>>,
-    required_item: Bound<'py, PyArray1<i16>>,
-    required_count: Bound<'py, PyArray1<i64>>,
-    task_kind: Bound<'py, PyArray1<i16>>,
-    task_role: Bound<'py, PyArray1<i16>>,
-    unit_role: Bound<'py, PyArray1<i16>>,
-    unit_zone: Bound<'py, PyArray1<i16>>,
-    task_zone: Bound<'py, PyArray1<i16>>,
-    reserved_by_kind: Bound<'py, PyArray1<i16>>,
-    previous_task: Bound<'py, PyArray1<i64>>,
+pub(crate) fn solve_routes_core(
+    starts_x: &[i16],
+    starts_y: &[i16],
+    inventories: &[i64],
+    active_tasks: &[bool],
+    exclusive: &[bool],
+    priorities: &[f32],
+    target_x: &[i16],
+    target_y: &[i16],
+    deadlines: &[i16],
+    required_item: &[i16],
+    required_count: &[i64],
+    task_kind: &[i16],
+    task_role: &[i16],
+    unit_role: &[i16],
+    unit_zone: &[i16],
+    task_zone: &[i16],
+    reserved_by_kind: &[i16],
+    previous_task: &[i64],
     role_bonus: f64,
     zone_bonus: f64,
     continuity_bonus: f64,
     board_size: usize,
     hour: i32,
     turns_per_day: i32,
-) -> PyResult<Vec<Vec<i64>>> {
-    let workers = starts_x.shape();
-    if workers.len() != 1 {
-        return Err(PyValueError::new_err("starts_x must be one-dimensional"));
-    }
-    let worker_count = workers[0];
-    if starts_y.shape() != [worker_count]
-        || unit_role.shape() != [worker_count]
-        || unit_zone.shape() != [worker_count]
-        || previous_task.shape() != [worker_count]
+) -> PyResult<Vec<Vec<usize>>> {
+    let worker_count = starts_x.len();
+    let task_count = active_tasks.len();
+    if starts_y.len() != worker_count
+        || unit_role.len() != worker_count
+        || unit_zone.len() != worker_count
+        || previous_task.len() != worker_count
+        || inventories.len() != worker_count.saturating_mul(INVENTORY_ITEMS)
     {
-        return Err(PyValueError::new_err(
-            "worker arrays must have the same one-dimensional shape",
-        ));
+        return Err(PyValueError::new_err("route worker slices have inconsistent lengths"));
     }
-    if inventories.shape() != [worker_count, INVENTORY_ITEMS] {
-        return Err(PyValueError::new_err(format!(
-            "inventories has shape {:?}, expected {:?}",
-            inventories.shape(),
-            [worker_count, INVENTORY_ITEMS]
-        )));
+    if exclusive.len() != task_count
+        || priorities.len() != task_count
+        || target_x.len() != task_count
+        || target_y.len() != task_count
+        || deadlines.len() != task_count
+        || required_item.len() != task_count
+        || required_count.len() != task_count
+        || task_kind.len() != task_count
+        || task_role.len() != task_count
+        || task_zone.len() != task_count
+        || reserved_by_kind.len() != 14
+    {
+        return Err(PyValueError::new_err("route task slices have inconsistent lengths"));
     }
-
-    let task_shape = active_tasks.shape();
-    if task_shape.len() != 1 {
-        return Err(PyValueError::new_err("active_tasks must be one-dimensional"));
-    }
-    let task_count = task_shape[0];
-    for (name, shape) in [
-        ("exclusive", exclusive.shape()),
-        ("priorities", priorities.shape()),
-        ("target_x", target_x.shape()),
-        ("target_y", target_y.shape()),
-        ("deadlines", deadlines.shape()),
-        ("required_item", required_item.shape()),
-        ("required_count", required_count.shape()),
-        ("task_kind", task_kind.shape()),
-        ("task_role", task_role.shape()),
-        ("task_zone", task_zone.shape()),
-    ] {
-        if shape != [task_count] {
-            return Err(PyValueError::new_err(format!(
-                "{name} has shape {shape:?}, expected {:?}",
-                [task_count]
-            )));
-        }
-    }
-    if reserved_by_kind.shape() != [14] {
-        return Err(PyValueError::new_err(format!(
-            "reserved_by_kind has shape {:?}, expected [14]",
-            reserved_by_kind.shape()
-        )));
-    }
-    if board_size == 0 || board_size.saturating_mul(board_size) > task_count {
-        return Err(PyValueError::new_err(
-            "board size does not fit inside the task slots",
-        ));
-    }
-    if turns_per_day <= 0 || hour < 0 || hour >= turns_per_day {
-        return Err(PyValueError::new_err("hour/turns_per_day are invalid"));
-    }
-
-    for (name, contiguous) in [
-        ("starts_x", starts_x.is_c_contiguous()),
-        ("starts_y", starts_y.is_c_contiguous()),
-        ("inventories", inventories.is_c_contiguous()),
-        ("active_tasks", active_tasks.is_c_contiguous()),
-        ("exclusive", exclusive.is_c_contiguous()),
-        ("priorities", priorities.is_c_contiguous()),
-        ("target_x", target_x.is_c_contiguous()),
-        ("target_y", target_y.is_c_contiguous()),
-        ("deadlines", deadlines.is_c_contiguous()),
-        ("required_item", required_item.is_c_contiguous()),
-        ("required_count", required_count.is_c_contiguous()),
-        ("task_kind", task_kind.is_c_contiguous()),
-        ("task_role", task_role.is_c_contiguous()),
-        ("unit_role", unit_role.is_c_contiguous()),
-        ("unit_zone", unit_zone.is_c_contiguous()),
-        ("task_zone", task_zone.is_c_contiguous()),
-        ("reserved_by_kind", reserved_by_kind.is_c_contiguous()),
-        ("previous_task", previous_task.is_c_contiguous()),
-    ] {
-        if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
-        }
-    }
-
-    let starts_x_guard = starts_x.try_readonly()?;
-    let starts_y_guard = starts_y.try_readonly()?;
-    let inventories_guard = inventories.try_readonly()?;
-    let active_tasks_guard = active_tasks.try_readonly()?;
-    let exclusive_guard = exclusive.try_readonly()?;
-    let priorities_guard = priorities.try_readonly()?;
-    let target_x_guard = target_x.try_readonly()?;
-    let target_y_guard = target_y.try_readonly()?;
-    let deadlines_guard = deadlines.try_readonly()?;
-    let required_item_guard = required_item.try_readonly()?;
-    let required_count_guard = required_count.try_readonly()?;
-    let task_kind_guard = task_kind.try_readonly()?;
-    let task_role_guard = task_role.try_readonly()?;
-    let unit_role_guard = unit_role.try_readonly()?;
-    let unit_zone_guard = unit_zone.try_readonly()?;
-    let task_zone_guard = task_zone.try_readonly()?;
-    let reserved_by_kind_guard = reserved_by_kind.try_readonly()?;
-    let previous_task_guard = previous_task.try_readonly()?;
-
-    let starts_x = starts_x_guard.as_slice()?;
-    let starts_y = starts_y_guard.as_slice()?;
-    let inventories = inventories_guard.as_slice()?;
-    let active_tasks = active_tasks_guard.as_slice()?;
-    let exclusive = exclusive_guard.as_slice()?;
-    let priorities = priorities_guard.as_slice()?;
-    let target_x = target_x_guard.as_slice()?;
-    let target_y = target_y_guard.as_slice()?;
-    let deadlines = deadlines_guard.as_slice()?;
-    let required_item = required_item_guard.as_slice()?;
-    let required_count = required_count_guard.as_slice()?;
-    let task_kind = task_kind_guard.as_slice()?;
-    let task_role = task_role_guard.as_slice()?;
-    let unit_role = unit_role_guard.as_slice()?;
-    let unit_zone = unit_zone_guard.as_slice()?;
-    let task_zone = task_zone_guard.as_slice()?;
-    let reserved_by_kind = reserved_by_kind_guard.as_slice()?;
-    let previous_task = previous_task_guard.as_slice()?;
-
     let mut routes = vec![Vec::<usize>::new(); worker_count];
     if worker_count == 0 {
         return Ok(Vec::new());
@@ -714,6 +613,195 @@ pub(crate) fn schedule_routes<'py>(
             prefix_length[local] = routes[local].len();
         }
     }
+
+    Ok(routes)
+}
+
+#[pyfunction]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    clippy::needless_pass_by_value,
+    clippy::similar_names,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+pub(crate) fn schedule_routes<'py>(
+    starts_x: Bound<'py, PyArray1<i16>>,
+    starts_y: Bound<'py, PyArray1<i16>>,
+    inventories: Bound<'py, PyArray2<i64>>,
+    active_tasks: Bound<'py, PyArray1<bool>>,
+    exclusive: Bound<'py, PyArray1<bool>>,
+    priorities: Bound<'py, PyArray1<f32>>,
+    target_x: Bound<'py, PyArray1<i16>>,
+    target_y: Bound<'py, PyArray1<i16>>,
+    deadlines: Bound<'py, PyArray1<i16>>,
+    required_item: Bound<'py, PyArray1<i16>>,
+    required_count: Bound<'py, PyArray1<i64>>,
+    task_kind: Bound<'py, PyArray1<i16>>,
+    task_role: Bound<'py, PyArray1<i16>>,
+    unit_role: Bound<'py, PyArray1<i16>>,
+    unit_zone: Bound<'py, PyArray1<i16>>,
+    task_zone: Bound<'py, PyArray1<i16>>,
+    reserved_by_kind: Bound<'py, PyArray1<i16>>,
+    previous_task: Bound<'py, PyArray1<i64>>,
+    role_bonus: f64,
+    zone_bonus: f64,
+    continuity_bonus: f64,
+    board_size: usize,
+    hour: i32,
+    turns_per_day: i32,
+) -> PyResult<Vec<Vec<i64>>> {
+    let workers = starts_x.shape();
+    if workers.len() != 1 {
+        return Err(PyValueError::new_err("starts_x must be one-dimensional"));
+    }
+    let worker_count = workers[0];
+    if starts_y.shape() != [worker_count]
+        || unit_role.shape() != [worker_count]
+        || unit_zone.shape() != [worker_count]
+        || previous_task.shape() != [worker_count]
+    {
+        return Err(PyValueError::new_err(
+            "worker arrays must have the same one-dimensional shape",
+        ));
+    }
+    if inventories.shape() != [worker_count, INVENTORY_ITEMS] {
+        return Err(PyValueError::new_err(format!(
+            "inventories has shape {:?}, expected {:?}",
+            inventories.shape(),
+            [worker_count, INVENTORY_ITEMS]
+        )));
+    }
+
+    let task_shape = active_tasks.shape();
+    if task_shape.len() != 1 {
+        return Err(PyValueError::new_err("active_tasks must be one-dimensional"));
+    }
+    let task_count = task_shape[0];
+    for (name, shape) in [
+        ("exclusive", exclusive.shape()),
+        ("priorities", priorities.shape()),
+        ("target_x", target_x.shape()),
+        ("target_y", target_y.shape()),
+        ("deadlines", deadlines.shape()),
+        ("required_item", required_item.shape()),
+        ("required_count", required_count.shape()),
+        ("task_kind", task_kind.shape()),
+        ("task_role", task_role.shape()),
+        ("task_zone", task_zone.shape()),
+    ] {
+        if shape != [task_count] {
+            return Err(PyValueError::new_err(format!(
+                "{name} has shape {shape:?}, expected {:?}",
+                [task_count]
+            )));
+        }
+    }
+    if reserved_by_kind.shape() != [14] {
+        return Err(PyValueError::new_err(format!(
+            "reserved_by_kind has shape {:?}, expected [14]",
+            reserved_by_kind.shape()
+        )));
+    }
+    if board_size == 0 || board_size.saturating_mul(board_size) > task_count {
+        return Err(PyValueError::new_err(
+            "board size does not fit inside the task slots",
+        ));
+    }
+    if turns_per_day <= 0 || hour < 0 || hour >= turns_per_day {
+        return Err(PyValueError::new_err("hour/turns_per_day are invalid"));
+    }
+
+    for (name, contiguous) in [
+        ("starts_x", starts_x.is_c_contiguous()),
+        ("starts_y", starts_y.is_c_contiguous()),
+        ("inventories", inventories.is_c_contiguous()),
+        ("active_tasks", active_tasks.is_c_contiguous()),
+        ("exclusive", exclusive.is_c_contiguous()),
+        ("priorities", priorities.is_c_contiguous()),
+        ("target_x", target_x.is_c_contiguous()),
+        ("target_y", target_y.is_c_contiguous()),
+        ("deadlines", deadlines.is_c_contiguous()),
+        ("required_item", required_item.is_c_contiguous()),
+        ("required_count", required_count.is_c_contiguous()),
+        ("task_kind", task_kind.is_c_contiguous()),
+        ("task_role", task_role.is_c_contiguous()),
+        ("unit_role", unit_role.is_c_contiguous()),
+        ("unit_zone", unit_zone.is_c_contiguous()),
+        ("task_zone", task_zone.is_c_contiguous()),
+        ("reserved_by_kind", reserved_by_kind.is_c_contiguous()),
+        ("previous_task", previous_task.is_c_contiguous()),
+    ] {
+        if !contiguous {
+            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+        }
+    }
+
+    let starts_x_guard = starts_x.try_readonly()?;
+    let starts_y_guard = starts_y.try_readonly()?;
+    let inventories_guard = inventories.try_readonly()?;
+    let active_tasks_guard = active_tasks.try_readonly()?;
+    let exclusive_guard = exclusive.try_readonly()?;
+    let priorities_guard = priorities.try_readonly()?;
+    let target_x_guard = target_x.try_readonly()?;
+    let target_y_guard = target_y.try_readonly()?;
+    let deadlines_guard = deadlines.try_readonly()?;
+    let required_item_guard = required_item.try_readonly()?;
+    let required_count_guard = required_count.try_readonly()?;
+    let task_kind_guard = task_kind.try_readonly()?;
+    let task_role_guard = task_role.try_readonly()?;
+    let unit_role_guard = unit_role.try_readonly()?;
+    let unit_zone_guard = unit_zone.try_readonly()?;
+    let task_zone_guard = task_zone.try_readonly()?;
+    let reserved_by_kind_guard = reserved_by_kind.try_readonly()?;
+    let previous_task_guard = previous_task.try_readonly()?;
+
+    let starts_x = starts_x_guard.as_slice()?;
+    let starts_y = starts_y_guard.as_slice()?;
+    let inventories = inventories_guard.as_slice()?;
+    let active_tasks = active_tasks_guard.as_slice()?;
+    let exclusive = exclusive_guard.as_slice()?;
+    let priorities = priorities_guard.as_slice()?;
+    let target_x = target_x_guard.as_slice()?;
+    let target_y = target_y_guard.as_slice()?;
+    let deadlines = deadlines_guard.as_slice()?;
+    let required_item = required_item_guard.as_slice()?;
+    let required_count = required_count_guard.as_slice()?;
+    let task_kind = task_kind_guard.as_slice()?;
+    let task_role = task_role_guard.as_slice()?;
+    let unit_role = unit_role_guard.as_slice()?;
+    let unit_zone = unit_zone_guard.as_slice()?;
+    let task_zone = task_zone_guard.as_slice()?;
+    let reserved_by_kind = reserved_by_kind_guard.as_slice()?;
+    let previous_task = previous_task_guard.as_slice()?;
+
+    let routes = solve_routes_core(
+        starts_x,
+        starts_y,
+        inventories,
+        active_tasks,
+        exclusive,
+        priorities,
+        target_x,
+        target_y,
+        deadlines,
+        required_item,
+        required_count,
+        task_kind,
+        task_role,
+        unit_role,
+        unit_zone,
+        task_zone,
+        reserved_by_kind,
+        previous_task,
+        role_bonus,
+        zone_bonus,
+        continuity_bonus,
+        board_size,
+        hour,
+        turns_per_day,
+    )?;
 
     routes
         .into_iter()
