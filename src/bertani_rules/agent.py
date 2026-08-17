@@ -26,6 +26,7 @@ from bertani.tasks import (
     TaskKind,
     TaskRule,
     WorkforcePlan,
+    propose_native_farm_tasks,
     propose_native_maintenance_tasks,
     propose_native_production_tasks,
     WorkRole,
@@ -573,6 +574,54 @@ class TerritorialWorkforcePlanner:
         )
 
 
+class FarmTaskRule:
+    """Generate maintenance and production mechanics in one native call."""
+
+    profile_key = "farm_tasks"
+
+    def __init__(
+        self,
+        shed_capacity: int = 100,
+        turns_per_day: int = 24,
+        episode_steps: int = 720,
+    ) -> None:
+        self.shed_capacity = shed_capacity
+        self.turns_per_day = turns_per_day
+        self.episode_steps = episode_steps
+
+    def propose(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+    ) -> None:
+        propose_native_farm_tasks(
+            batch,
+            intent,
+            tasks,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
+    def propose_masked(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        seat_mask: NDArray[np.bool_],
+    ) -> None:
+        propose_native_farm_tasks(
+            batch,
+            intent,
+            tasks,
+            seat_mask=seat_mask,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
+
 class MaintenanceTaskRule:
     """Generate deterministic maintenance tasks in the native extension."""
 
@@ -665,6 +714,24 @@ class EconomyMarketRule:
             turns_per_day=self.turns_per_day,
         )
 
+    def propose_masked(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        plan: MarketPlanBatch,
+        seat_mask: NDArray[np.bool_],
+    ) -> None:
+        propose_native_rule_market(
+            batch,
+            intent,
+            plan,
+            seat_mask=seat_mask,
+            starting_money=self.starting_money,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+            turns_per_day=self.turns_per_day,
+        )
+
 
 def build_policy(
     config: RuleConfig | None = None,
@@ -700,12 +767,7 @@ def build_policy(
             else None
         ),
         task_rules=(
-            MaintenanceTaskRule(
-                turns_per_day=resolved.turns_per_day,
-                shed_capacity=resolved.shed_capacity,
-                episode_steps=resolved.episode_steps,
-            ),
-            ProductionTaskRule(
+            FarmTaskRule(
                 shed_capacity=resolved.shed_capacity,
                 turns_per_day=resolved.turns_per_day,
                 episode_steps=resolved.episode_steps,
@@ -723,6 +785,7 @@ def build_policy(
     )
 __all__ = [
     "EconomyMarketRule",
+    "FarmTaskRule",
     "MaintenanceTaskRule",
     "OPENING_BOOK",
     "ProductionTaskRule",

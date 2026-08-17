@@ -169,6 +169,7 @@ class VectorRulePolicy:
             "features_intent": 0,
             "maintenance_tasks": 0,
             "production_tasks": 0,
+            "farm_tasks": 0,
             "other_tasks": 0,
             "workforce": 0,
             "scheduler": 0,
@@ -261,7 +262,11 @@ class VectorRulePolicy:
         tasks.clear()
         for rule in self.task_rules:
             started = time.perf_counter_ns() if self.profile else 0
-            rule.propose(batch, intent, tasks)
+            masked_propose = getattr(rule, "propose_masked", None)
+            if seat_mask is not None and masked_propose is not None:
+                masked_propose(batch, intent, tasks, seat_mask)
+            else:
+                rule.propose(batch, intent, tasks)
             if self.profile:
                 key = getattr(rule, "profile_key", "other_tasks")
                 self.profile_ns.setdefault(key, 0)
@@ -279,28 +284,31 @@ class VectorRulePolicy:
             self.profile_ns["workforce"] += time.perf_counter_ns() - started
 
         started = time.perf_counter_ns() if self.profile else 0
-        assignments = self._task_scheduler.assign(
+        assignments = self._task_scheduler.assign_and_execute(
             batch,
             tasks,
+            actions.unit_actions,
             workforce,
             seat_mask=seat_mask,
         )
         if self.profile:
+            # V12 fuses deterministic task execution into the native scheduler
+            # call. Keep the existing key so historical pit profiles remain
+            # directly comparable; executor should now stay at zero.
             self.profile_ns["scheduler"] += time.perf_counter_ns() - started
-
-        started = time.perf_counter_ns() if self.profile else 0
-        self._task_executor.execute(
-            batch, tasks, assignments, actions.unit_actions
-        )
-        if self.profile:
-            self.profile_ns["executor"] += time.perf_counter_ns() - started
         self.last_tasks = tasks
         self.last_assignments = assignments
 
         started = time.perf_counter_ns() if self.profile else 0
-        self._append_liquidation_sales(features, intent, self.last_market_plan)
+        self._append_liquidation_sales(
+            features, intent, self.last_market_plan, seat_mask=seat_mask
+        )
         for rule in self.market_rules:
-            rule.propose(batch, intent, self.last_market_plan)
+            masked_propose = getattr(rule, "propose_masked", None)
+            if seat_mask is not None and masked_propose is not None:
+                masked_propose(batch, intent, self.last_market_plan, seat_mask)
+            else:
+                rule.propose(batch, intent, self.last_market_plan)
         if self.opening_controller is not None:
             self.last_opening_diagnostics = self.opening_controller.apply(
                 batch,
@@ -355,6 +363,8 @@ class VectorRulePolicy:
         features: RuleFeatures,
         intent: StrategicIntent,
         plan: MarketPlanBatch,
+        *,
+        seat_mask: NDArray[np.bool_] | None = None,
     ) -> None:
         """Serialize ragged sell orders after vectorized eligibility checks."""
 
@@ -363,6 +373,8 @@ class VectorRulePolicy:
         # be sold directly. This tiny ragged loop is intentionally isolated in
         # the executor; the expensive state evaluation remains batched.
         sellable = (shed[..., :9] > 0) & intent.liquidate[..., None]
+        if seat_mask is not None:
+            sellable &= seat_mask[..., None]
         for item in range(9):
             plan.append(
                 sellable[..., item],

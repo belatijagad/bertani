@@ -10,10 +10,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 try:
+    from ._rust import execute_assignments as _execute_assignments
+    from ._rust import propose_farm_tasks as _propose_farm_tasks
     from ._rust import propose_maintenance_tasks as _propose_maintenance_tasks
     from ._rust import propose_production_tasks as _propose_production_tasks
     from ._rust import NativeTaskScheduler as _NativeTaskScheduler
 except (ImportError, ModuleNotFoundError):
+    _execute_assignments = None
+    _propose_farm_tasks = None
     _propose_maintenance_tasks = None
     _propose_production_tasks = None
     _NativeTaskScheduler = None
@@ -35,6 +39,19 @@ def _active_unit_limit(active_units: NDArray[np.bool_]) -> int:
 
     active_slots = np.flatnonzero(np.any(active_units, axis=(0, 1)))
     return int(active_slots[-1]) + 1 if active_slots.size else 0
+
+
+def _normalized_seat_mask(
+    batch: Batch, seat_mask: NDArray[np.bool_] | None
+) -> NDArray[np.bool_]:
+    shape = batch.active_units.shape[:2]
+    if seat_mask is None:
+        return np.ones(shape, dtype=np.bool_)
+    if seat_mask.shape != shape:
+        raise ValueError(f"seat mask must have shape {shape}")
+    if seat_mask.dtype == np.bool_ and seat_mask.flags.c_contiguous:
+        return seat_mask
+    return np.ascontiguousarray(seat_mask, dtype=np.bool_)
 
 
 class TaskKind(IntEnum):
@@ -249,10 +266,59 @@ class TaskBatch:
         self.work_role[..., slot] = np.where(active, work_role, WorkRole.ANY)
 
 
+def propose_native_farm_tasks(
+    batch: Batch,
+    intent: StrategicIntent,
+    tasks: TaskBatch,
+    *,
+    seat_mask: NDArray[np.bool_] | None = None,
+    turns_per_day: int,
+    shed_capacity: int,
+    episode_steps: int,
+) -> None:
+    """Populate maintenance and production tasks through one native call."""
+
+    if _propose_farm_tasks is None:
+        raise RuntimeError(
+            "native farm tasks require the bertani._rust extension"
+        )
+    views = batch.observation_views
+    _propose_farm_tasks(
+        views.tiles,
+        views.global_features,
+        views.units,
+        views.private,
+        batch.active_units,
+        _normalized_seat_mask(batch, seat_mask),
+        np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
+        tasks.active,
+        tasks.kind,
+        tasks.target_x,
+        tasks.target_y,
+        tasks.item,
+        tasks.quantity,
+        tasks.priority,
+        tasks.deadline,
+        tasks.estimated_value,
+        tasks.required_item,
+        tasks.required_count,
+        tasks.exclusive,
+        tasks.work_role,
+        tasks.board_size,
+        tasks.tile_slots,
+        turns_per_day,
+        shed_capacity,
+        episode_steps,
+    )
+
+
 def propose_native_maintenance_tasks(
     batch: Batch,
     tasks: TaskBatch,
     *,
+    seat_mask: NDArray[np.bool_] | None = None,
     turns_per_day: int,
     shed_capacity: int,
     episode_steps: int,
@@ -275,6 +341,7 @@ def propose_native_maintenance_tasks(
         views.units,
         views.private,
         batch.active_units,
+        _normalized_seat_mask(batch, seat_mask),
         tasks.active,
         tasks.kind,
         tasks.target_x,
@@ -302,6 +369,7 @@ def propose_native_production_tasks(
     intent: StrategicIntent,
     tasks: TaskBatch,
     *,
+    seat_mask: NDArray[np.bool_] | None = None,
     turns_per_day: int,
     shed_capacity: int,
     episode_steps: int,
@@ -322,6 +390,7 @@ def propose_native_production_tasks(
         views.units,
         views.private,
         batch.active_units,
+        _normalized_seat_mask(batch, seat_mask),
         np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
         np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
         np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
@@ -456,13 +525,12 @@ class TaskScheduler:
             for name, count in zip(self._FORCE_REPLAN_NAMES, counts, strict=True)
         }
 
-    def assign(
+    def _prepare_inputs(
         self,
         batch: Batch,
-        tasks: TaskBatch,
-        workforce: WorkforcePlan | None = None,
-        seat_mask: NDArray[np.bool_] | None = None,
-    ) -> TaskAssignments:
+        workforce: WorkforcePlan | None,
+        seat_mask: NDArray[np.bool_] | None,
+    ):
         n, players, unit_count = batch.active_units.shape
         shape = (n, players, unit_count)
         if self._assignments is None or self._shape != shape:
@@ -521,6 +589,32 @@ class TaskScheduler:
                     dtype=np.int16,
                 )
 
+        return (
+            controlled_seats,
+            unit_role,
+            unit_zone,
+            reserved_by_kind,
+            role_bonus,
+            zone_bonus,
+        )
+
+    def assign(
+        self,
+        batch: Batch,
+        tasks: TaskBatch,
+        workforce: WorkforcePlan | None = None,
+        seat_mask: NDArray[np.bool_] | None = None,
+    ) -> TaskAssignments:
+        (
+            controlled_seats,
+            unit_role,
+            unit_zone,
+            reserved_by_kind,
+            role_bonus,
+            zone_bonus,
+        ) = self._prepare_inputs(batch, workforce, seat_mask)
+        assert self._assignments is not None
+
         views = batch.observation_views
         self._native.assign(
             views.global_features,
@@ -547,32 +641,67 @@ class TaskScheduler:
         )
         return self._assignments
 
+    def assign_and_execute(
+        self,
+        batch: Batch,
+        tasks: TaskBatch,
+        unit_actions: NDArray[np.int64],
+        workforce: WorkforcePlan | None = None,
+        seat_mask: NDArray[np.bool_] | None = None,
+    ) -> TaskAssignments:
+        """Assign tasks and emit legal unit actions in one native call."""
+
+        (
+            controlled_seats,
+            unit_role,
+            unit_zone,
+            reserved_by_kind,
+            role_bonus,
+            zone_bonus,
+        ) = self._prepare_inputs(batch, workforce, seat_mask)
+        assert self._assignments is not None
+
+        views = batch.observation_views
+        masks = batch.mask_views
+        self._native.assign_and_execute(
+            views.global_features,
+            views.units,
+            masks.unit_ops,
+            masks.unit_args,
+            batch.active_units,
+            tasks.active,
+            tasks.kind,
+            tasks.target_x,
+            tasks.target_y,
+            tasks.item,
+            tasks.quantity,
+            tasks.priority,
+            tasks.deadline,
+            tasks.required_item,
+            tasks.required_count,
+            tasks.exclusive,
+            tasks.work_role,
+            unit_role,
+            unit_zone,
+            reserved_by_kind,
+            controlled_seats,
+            self._assignments.task_index,
+            self._assignments.score,
+            unit_actions,
+            role_bonus,
+            zone_bonus,
+        )
+        return self._assignments
+
 
 class TaskExecutor:
-    """Convert task assignments into masked movement or interaction actions."""
-
-    _OPERATIONS = {
-        TaskKind.WATER: UnitOp.WATER,
-        TaskKind.FEED: UnitOp.FEED,
-        TaskKind.CARE: UnitOp.CARE,
-        TaskKind.HARVEST: UnitOp.HARVEST,
-        TaskKind.COLLECT_FERTILIZER: UnitOp.COLLECT_FERTILIZER,
-        TaskKind.CLEAR_WEED: UnitOp.DIG,
-        TaskKind.PLANT: UnitOp.PLANT,
-        TaskKind.FERTILIZE: UnitOp.FERTILIZE,
-        TaskKind.BUILD_COOP: UnitOp.BUILD_COOP,
-        TaskKind.BUILD_PASTURE: UnitOp.BUILD_PASTURE,
-        TaskKind.PLACE_ANIMAL: UnitOp.PLACE,
-        TaskKind.FETCH_ITEM: UnitOp.PICKUP,
-        TaskKind.DEPOSIT_INVENTORY: UnitOp.DROP,
-    }
-    _ARGUMENT_OPERATIONS = {
-        UnitOp.PICKUP,
-        UnitOp.PLACE,
-        UnitOp.PLANT,
-    }
+    """Convert assignments into legal primitive actions through Rust."""
 
     def __init__(self, board_size: int) -> None:
+        if _execute_assignments is None:
+            raise RuntimeError(
+                "native task execution requires the bertani._rust extension"
+            )
         self.board_size = board_size
 
     def execute(
@@ -582,80 +711,22 @@ class TaskExecutor:
         assignments: TaskAssignments,
         unit_actions: NDArray[np.int64],
     ) -> None:
-        unit_actions.fill(0)
-        active_limit = _active_unit_limit(batch.active_units)
-        if active_limit == 0:
-            return
-
-        units = batch.observation_views.units[:, :, 0, :active_limit]
-        scale = max(1, self.board_size - 1)
-        unit_x = np.rint(units[..., 2] * scale).astype(np.int16)
-        unit_y = np.rint(units[..., 3] * scale).astype(np.int16)
-        task_index = assignments.task_index[..., :active_limit]
-        assigned = task_index >= 0
-        safe_task = np.maximum(task_index, 0)
-
-        def task_field(values: NDArray) -> NDArray:
-            return np.take_along_axis(values, safe_task, axis=2)
-
-        target_x = task_field(tasks.target_x).copy()
-        target_y = task_field(tasks.target_y).copy()
-        kind = task_field(tasks.kind)
-        item = task_field(tasks.item)
-        count = task_field(tasks.quantity)
-
-        deposit = assigned & (kind == TaskKind.DEPOSIT_INVENTORY)
-        half = self.board_size // 2
-        low_center, high_center = max(0, half - 1), half
-        at_shed = deposit & np.isin(unit_x, (low_center, high_center)) & np.isin(
-            unit_y, (low_center, high_center)
+        views = batch.observation_views
+        masks = batch.mask_views
+        _execute_assignments(
+            views.units,
+            masks.unit_ops,
+            masks.unit_args,
+            batch.active_units,
+            tasks.kind,
+            tasks.target_x,
+            tasks.target_y,
+            tasks.item,
+            tasks.quantity,
+            assignments.task_index,
+            unit_actions,
+            self.board_size,
         )
-        target_x[deposit] = np.where(
-            unit_x[deposit] <= low_center, low_center, high_center
-        )
-        target_y[deposit] = np.where(
-            unit_y[deposit] <= low_center, low_center, high_center
-        )
-
-        moving = assigned & ~at_shed & (
-            (unit_x != target_x) | (unit_y != target_y)
-        )
-        movement = np.where(
-            unit_x < target_x,
-            UnitOp.EAST,
-            np.where(
-                unit_x > target_x,
-                UnitOp.WEST,
-                np.where(unit_y < target_y, UnitOp.SOUTH, UnitOp.NORTH),
-            ),
-        ).astype(np.int64)
-
-        operation_lookup = np.full(max(TaskKind) + 1, UnitOp.PASS, dtype=np.int64)
-        for task_kind, operation in self._OPERATIONS.items():
-            operation_lookup[task_kind] = operation
-        operation = operation_lookup[kind]
-        operation = np.where(moving, movement, operation)
-        operation = np.where(at_shed, UnitOp.DROP, operation)
-
-        grid = np.indices(assigned.shape)
-        legal = assigned & batch.mask_views.unit_ops[
-            grid[0], grid[1], grid[2], operation
-        ]
-        interaction = assigned & ~moving & ~at_shed
-        needs_argument = interaction & np.isin(
-            operation, tuple(self._ARGUMENT_OPERATIONS)
-        )
-        safe_item = np.maximum(item, 0)
-        argument_legal = batch.mask_views.unit_args[
-            grid[0], grid[1], grid[2], operation, safe_item
-        ]
-        legal &= ~needs_argument | ((item >= 0) & argument_legal)
-
-        active_actions = unit_actions[..., :active_limit, :]
-        active_actions[..., 0][legal] = operation[legal]
-        write_arguments = legal & interaction
-        active_actions[..., 1][write_arguments] = safe_item[write_arguments]
-        active_actions[..., 2][write_arguments] = count[write_arguments]
 
     @staticmethod
     def _movement(x: int, y: int, target_x: int, target_y: int) -> UnitOp:
@@ -677,6 +748,7 @@ __all__ = [
     "TaskKind",
     "TaskRule",
     "TaskScheduler",
+    "propose_native_farm_tasks",
     "WorkforcePlan",
     "WorkforcePlanner",
     "WorkRole",

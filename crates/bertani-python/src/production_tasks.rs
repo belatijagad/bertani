@@ -324,6 +324,7 @@ pub(crate) fn propose_production_tasks<'py>(
     units: Bound<'py, PyArray5<f32>>,
     private: Bound<'py, PyArray3<f32>>,
     active_units: Bound<'py, PyArray3<bool>>,
+    seat_mask: Bound<'py, PyArray2<bool>>,
     target_crop_counts: Bound<'py, PyArray3<i64>>,
     target_animal_counts: Bound<'py, PyArray3<i64>>,
     liquidate: Bound<'py, PyArray2<bool>>,
@@ -383,6 +384,9 @@ pub(crate) fn propose_production_tasks<'py>(
     let max_units = unit_shape[3];
     if active_units.shape() != [num_envs, players, max_units] {
         return Err(PyValueError::new_err("active_units shape does not match units"));
+    }
+    if seat_mask.shape() != [num_envs, players] {
+        return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
     }
     let private_shape = private.shape();
     if private_shape.len() != 3
@@ -457,6 +461,7 @@ pub(crate) fn propose_production_tasks<'py>(
     let units_guard = units.try_readonly()?;
     let private_guard = private.try_readonly()?;
     let active_units_guard = active_units.try_readonly()?;
+    let seat_mask_guard = seat_mask.try_readonly()?;
     let target_crop_guard = target_crop_counts.try_readonly()?;
     let target_animal_guard = target_animal_counts.try_readonly()?;
     let liquidate_guard = liquidate.try_readonly()?;
@@ -465,6 +470,7 @@ pub(crate) fn propose_production_tasks<'py>(
     let units = units_guard.as_array();
     let private = private_guard.as_array();
     let active_units = active_units_guard.as_array();
+    let seat_mask = seat_mask_guard.as_array();
     let target_crop_counts = target_crop_guard.as_array();
     let target_animal_counts = target_animal_guard.as_array();
     let liquidate = liquidate_guard.as_array();
@@ -508,6 +514,9 @@ pub(crate) fn propose_production_tasks<'py>(
 
     for environment in 0..num_envs {
         for player in 0..players {
+            if !seat_mask[[environment, player]] {
+                continue;
+            }
             let step = rounded_i64(global_features[[environment, player, 0]], last_step);
             let day = step / i64::from(turns_per_day);
             let hour = step % i64::from(turns_per_day);

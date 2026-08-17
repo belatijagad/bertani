@@ -2,6 +2,8 @@
 
 mod action;
 mod encoding;
+mod executor;
+mod farm_tasks;
 mod maintenance_tasks;
 mod market_rule;
 mod production_tasks;
@@ -16,6 +18,12 @@ use pyo3::prelude::*;
 mod _rust {
     #[pymodule_export]
     use super::vec_env::NativeVecEnv;
+
+    #[pymodule_export]
+    use super::executor::execute_assignments;
+
+    #[pymodule_export]
+    use super::farm_tasks::propose_farm_tasks;
 
     #[pymodule_export]
     use super::maintenance_tasks::propose_maintenance_tasks;

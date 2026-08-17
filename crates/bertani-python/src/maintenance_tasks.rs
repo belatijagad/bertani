@@ -14,7 +14,7 @@
 )]
 
 use numpy::{
-    PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
+    PyArray2, PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -150,6 +150,7 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     units: Bound<'py, PyArray5<f32>>,
     private: Bound<'py, PyArray3<f32>>,
     active_units: Bound<'py, PyArray3<bool>>,
+    seat_mask: Bound<'py, PyArray2<bool>>,
     task_active: Bound<'py, PyArray3<bool>>,
     task_kind: Bound<'py, PyArray3<i16>>,
     task_target_x: Bound<'py, PyArray3<i16>>,
@@ -206,6 +207,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     let max_units = unit_shape[3];
     if active_units.shape() != [num_envs, players, max_units] {
         return Err(PyValueError::new_err("active_units shape does not match units"));
+    }
+    if seat_mask.shape() != [num_envs, players] {
+        return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
     }
     let private_shape = private.shape();
     if private_shape.len() != 3
@@ -271,11 +275,13 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     let units_guard = units.try_readonly()?;
     let private_guard = private.try_readonly()?;
     let active_units_guard = active_units.try_readonly()?;
+    let seat_mask_guard = seat_mask.try_readonly()?;
     let tiles = tiles_guard.as_array();
     let global_features = global_guard.as_array();
     let units = units_guard.as_array();
     let private = private_guard.as_array();
     let active_units = active_units_guard.as_array();
+    let seat_mask = seat_mask_guard.as_array();
 
     let mut active_guard = task_active.try_readwrite()?;
     let mut kind_guard = task_kind.try_readwrite()?;
@@ -317,6 +323,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
 
     for environment in 0..num_envs {
         for player in 0..players {
+            if !seat_mask[[environment, player]] {
+                continue;
+            }
             let step = rounded_i64(global_features[[environment, player, 0]], last_step);
             let day = step / i64::from(turns_per_day);
             let seat_base = (environment * players + player) * capacity;

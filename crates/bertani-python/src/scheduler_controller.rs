@@ -9,12 +9,13 @@
 #![allow(clippy::all, clippy::pedantic)]
 
 use numpy::{
-    ndarray::ArrayView5, PyArray2, PyArray3, PyArray5, PyArrayMethods,
+    ndarray::ArrayView5, PyArray2, PyArray3, PyArray4, PyArray5, PyArrayMethods,
     PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::executor::execute_assignments;
 use crate::route_scheduler::solve_routes_core;
 
 const INVENTORY_ITEMS: usize = 12;
@@ -350,6 +351,83 @@ impl NativeTaskScheduler {
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assign_and_execute<'py>(
+        &mut self,
+        global_features: Bound<'py, PyArray3<f32>>,
+        units: Bound<'py, PyArray5<f32>>,
+        unit_ops: Bound<'py, PyArray4<bool>>,
+        unit_args: Bound<'py, PyArray5<bool>>,
+        active_units: Bound<'py, PyArray3<bool>>,
+        task_active: Bound<'py, PyArray3<bool>>,
+        task_kind: Bound<'py, PyArray3<i16>>,
+        task_target_x: Bound<'py, PyArray3<i16>>,
+        task_target_y: Bound<'py, PyArray3<i16>>,
+        task_item: Bound<'py, PyArray3<i16>>,
+        task_quantity: Bound<'py, PyArray3<i64>>,
+        task_priority: Bound<'py, PyArray3<f32>>,
+        task_deadline: Bound<'py, PyArray3<i16>>,
+        task_required_item: Bound<'py, PyArray3<i16>>,
+        task_required_count: Bound<'py, PyArray3<i64>>,
+        task_exclusive: Bound<'py, PyArray3<bool>>,
+        task_work_role: Bound<'py, PyArray3<i16>>,
+        unit_role: Bound<'py, PyArray3<i16>>,
+        unit_zone: Bound<'py, PyArray3<i16>>,
+        reserved_by_kind: Bound<'py, PyArray3<i16>>,
+        seat_mask: Bound<'py, PyArray2<bool>>,
+        out_task_index: Bound<'py, PyArray3<i64>>,
+        out_score: Bound<'py, PyArray3<f32>>,
+        out_unit_actions: Bound<'py, PyArray4<i64>>,
+        role_bonus: f64,
+        zone_bonus: f64,
+    ) -> PyResult<()> {
+        let units_for_execute = units.clone();
+        let active_for_execute = active_units.clone();
+        let kind_for_execute = task_kind.clone();
+        let target_x_for_execute = task_target_x.clone();
+        let target_y_for_execute = task_target_y.clone();
+        let task_index_for_execute = out_task_index.clone();
+
+        self.assign(
+            global_features,
+            units,
+            active_units,
+            task_active,
+            task_kind,
+            task_target_x,
+            task_target_y,
+            task_priority,
+            task_deadline,
+            task_required_item,
+            task_required_count,
+            task_exclusive,
+            task_work_role,
+            unit_role,
+            unit_zone,
+            reserved_by_kind,
+            seat_mask,
+            out_task_index,
+            out_score,
+            role_bonus,
+            zone_bonus,
+        )?;
+
+        execute_assignments(
+            units_for_execute,
+            unit_ops,
+            unit_args,
+            active_for_execute,
+            kind_for_execute,
+            target_x_for_execute,
+            target_y_for_execute,
+            task_item,
+            task_quantity,
+            task_index_for_execute,
+            out_unit_actions,
+            self.board_size,
+        )
     }
 }
 

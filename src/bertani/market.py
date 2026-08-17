@@ -124,6 +124,7 @@ def propose_native_rule_market(
     intent: StrategicIntent,
     plan: MarketPlanBatch,
     *,
+    seat_mask: NDArray[np.bool_] | None = None,
     starting_money: int,
     shed_capacity: int,
     episode_steps: int,
@@ -139,6 +140,17 @@ def propose_native_rule_market(
             "native rule market requires the bertani._rust extension"
         )
     views = batch.observation_views
+    shape = batch.active_units.shape[:2]
+    if seat_mask is None:
+        controlled_seats = np.ones(shape, dtype=np.bool_)
+    else:
+        if seat_mask.shape != shape:
+            raise ValueError(f"seat mask must have shape {shape}")
+        controlled_seats = (
+            seat_mask
+            if seat_mask.dtype == np.bool_ and seat_mask.flags.c_contiguous
+            else np.ascontiguousarray(seat_mask, dtype=np.bool_)
+        )
     _propose_rule_market(
         views.global_features,
         views.farms,
@@ -146,6 +158,7 @@ def propose_native_rule_market(
         views.units,
         views.private,
         batch.active_units,
+        controlled_seats,
         np.ascontiguousarray(intent.target_hands, dtype=np.int64),
         np.ascontiguousarray(intent.wheat_reserve, dtype=np.int64),
         np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),

@@ -2,8 +2,8 @@
 //!
 //! This is intentionally a backend for the *rule policy*, not the strategic
 //! interface used by a future learned policy. Python still supplies the
-//! high-level StrategicIntent arrays; this module mirrors the existing
-//! EconomyMarketRule exactly and writes directly into MarketPlanBatch buffers.
+//! high-level `StrategicIntent` arrays; this module mirrors the existing
+//! `EconomyMarketRule` exactly and writes directly into `MarketPlanBatch` buffers.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -138,6 +138,7 @@ pub(crate) fn propose_rule_market<'py>(
     units: Bound<'py, PyArray5<f32>>,
     private: Bound<'py, PyArray3<f32>>,
     active_units: Bound<'py, PyArray3<bool>>,
+    seat_mask: Bound<'py, PyArray2<bool>>,
     target_hands: Bound<'py, PyArray2<i64>>,
     wheat_reserve: Bound<'py, PyArray2<i64>>,
     target_crop_counts: Bound<'py, PyArray3<i64>>,
@@ -197,6 +198,9 @@ pub(crate) fn propose_rule_market<'py>(
     if active_units.shape() != [num_envs, players, max_units] {
         return Err(PyValueError::new_err("active_units shape does not match units"));
     }
+    if seat_mask.shape() != [num_envs, players] {
+        return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
+    }
 
     let private_shape = private.shape();
     if private_shape.len() != 3
@@ -248,6 +252,7 @@ pub(crate) fn propose_rule_market<'py>(
     let units_guard = units.try_readonly()?;
     let private_guard = private.try_readonly()?;
     let active_guard = active_units.try_readonly()?;
+    let seat_mask_guard = seat_mask.try_readonly()?;
     let target_hands_guard = target_hands.try_readonly()?;
     let wheat_reserve_guard = wheat_reserve.try_readonly()?;
     let target_crop_guard = target_crop_counts.try_readonly()?;
@@ -260,6 +265,7 @@ pub(crate) fn propose_rule_market<'py>(
     let units = units_guard.as_array();
     let private = private_guard.as_array();
     let active_units = active_guard.as_array();
+    let seat_mask = seat_mask_guard.as_array();
     let target_hands = target_hands_guard.as_array();
     let wheat_reserve = wheat_reserve_guard.as_array();
     let target_crop_counts = target_crop_guard.as_array();
@@ -283,6 +289,9 @@ pub(crate) fn propose_rule_market<'py>(
 
     for environment in 0..num_envs {
         for player in 0..players {
+            if !seat_mask[[environment, player]] {
+                continue;
+            }
             if liquidate[[environment, player]] {
                 // The reference Python rule gates almost every market decision
                 // behind `active = ~intent.liquidate`, but HIRE is intentionally
