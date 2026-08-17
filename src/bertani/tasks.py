@@ -277,6 +277,22 @@ class WorkforcePlanner(Protocol):
         """Return per-unit preferences for the current scheduling turn."""
 
 
+@dataclass(slots=True)
+class _RouteEvalCache:
+    """Precomputed route state for O(1) insertion scoring.
+
+    ``prev_x/y`` and ``elapsed_before`` describe the state immediately before
+    each insertion position. ``suffix_new_misses[position, delta]`` stores how
+    many currently-on-time tasks at/after ``position`` become late if insertion
+    shifts that suffix by ``delta`` turns.
+    """
+
+    prev_x: NDArray[np.int16]
+    prev_y: NDArray[np.int16]
+    elapsed_before: NDArray[np.int16]
+    suffix_new_misses: NDArray[np.int16]
+
+
 class TaskScheduler:
     """Fast route-aware rolling-horizon assignment for farm tasks.
 
@@ -303,7 +319,15 @@ class TaskScheduler:
         continuity_bonus: float = 1.0,
         episode_steps: int = 720,
         turns_per_day: int = 24,
+        scheduler_mode: str = "route",
     ) -> None:
+        if scheduler_mode not in {"route", "native"}:
+            raise ValueError("scheduler_mode must be 'route' or 'native'")
+        if scheduler_mode == "native" and _native_schedule_tasks is None:
+            raise RuntimeError(
+                "native scheduler requested but bertani._rust.schedule_tasks is unavailable"
+            )
+        self.scheduler_mode = scheduler_mode
         self.board_size = board_size
         self.shed_capacity = shed_capacity
         self.continuity_bonus = continuity_bonus
@@ -324,6 +348,16 @@ class TaskScheduler:
         # Lightweight profiling counters.
         self.full_solves = 0
         self.cache_hits = 0
+
+        # Reusable compact buffers for the opt-in native greedy scheduler.
+        # Their unit axis is only the live prefix, never VecEnv's padded 231.
+        self._native_shape: tuple[int, int, int] | None = None
+        self._native_active: NDArray[np.bool_] | None = None
+        self._native_role: NDArray[np.int16] | None = None
+        self._native_zone: NDArray[np.int16] | None = None
+        self._native_previous: NDArray[np.int64] | None = None
+        self._native_task_index: NDArray[np.int64] | None = None
+        self._native_scores: NDArray[np.float32] | None = None
 
     def assign(
         self,
@@ -421,6 +455,27 @@ class TaskScheduler:
             + (tasks.target_x >= half).astype(np.int16)
         )
 
+        if self.scheduler_mode == "native":
+            self._assign_native_greedy(
+                batch=batch,
+                tasks=tasks,
+                assignments=assignments,
+                active_limit=active_limit,
+                unit_x=unit_x,
+                unit_y=unit_y,
+                inventories=inventories,
+                unit_role=unit_role,
+                unit_zone=unit_zone,
+                task_zone=task_zone,
+                role_bonus=role_bonus,
+                zone_bonus=zone_bonus,
+                reserved_by_kind=reserved_by_kind,
+                controlled_seats=controlled_seats,
+            )
+            self._previous_task[...] = assignments.task_index
+            self._previous_task[~batch.active_units] = -1
+            return assignments
+
         for environment, player in np.argwhere(controlled_seats):
             self._assign_seat(
                 environment=int(environment),
@@ -444,6 +499,118 @@ class TaskScheduler:
         self._previous_task[...] = assignments.task_index
         self._previous_task[~batch.active_units] = -1
         return assignments
+
+    def _assign_native_greedy(
+        self,
+        *,
+        batch: Batch,
+        tasks: TaskBatch,
+        assignments: TaskAssignments,
+        active_limit: int,
+        unit_x: NDArray[np.int16],
+        unit_y: NDArray[np.int16],
+        inventories: NDArray[np.int64],
+        unit_role: NDArray[np.int16],
+        unit_zone: NDArray[np.int16],
+        task_zone: NDArray[np.int16],
+        role_bonus: float,
+        zone_bonus: float,
+        reserved_by_kind: NDArray[np.int16],
+        controlled_seats: NDArray[np.bool_],
+    ) -> None:
+        """Run the existing Rust priority-tiered greedy scheduler.
+
+        This is an opt-in experiment for rollout throughput.  It is *not*
+        behavior-equivalent to the route-aware Python scheduler: it chooses one
+        task per worker greedily inside urgency bands rather than constructing
+        complete routes.  The pit harness exposes it behind ``--scheduler
+        native`` so speed and strength can be measured independently.
+
+        Only the live unit prefix is copied into contiguous arrays before
+        crossing the PyO3 boundary.  Uncontrolled seats are marked inactive so
+        the native scheduler does no useful work for outputs the pit will throw
+        away.
+        """
+
+        assert _native_schedule_tasks is not None
+        if active_limit <= 0:
+            return
+        assert self._previous_task is not None
+
+        # Slicing the last axis of a [N, P, max_units] tensor leaves the parent
+        # row stride in place, so explicitly compact the few live slots.  With
+        # the current strategy this is normally ~5-14 units instead of 231.
+        native_shape = (*batch.active_units.shape[:2], active_limit)
+        if self._native_shape != native_shape:
+            self._native_active = np.empty(native_shape, dtype=np.bool_)
+            self._native_role = np.empty(native_shape, dtype=np.int16)
+            self._native_zone = np.empty(native_shape, dtype=np.int16)
+            self._native_previous = np.empty(native_shape, dtype=np.int64)
+            self._native_task_index = np.empty(native_shape, dtype=np.int64)
+            self._native_scores = np.empty(native_shape, dtype=np.float32)
+            self._native_shape = native_shape
+
+        assert self._native_active is not None
+        assert self._native_role is not None
+        assert self._native_zone is not None
+        assert self._native_previous is not None
+        assert self._native_task_index is not None
+        assert self._native_scores is not None
+
+        native_active = self._native_active
+        native_role = self._native_role
+        native_zone = self._native_zone
+        native_previous = self._native_previous
+        native_task_index = self._native_task_index
+        native_scores = self._native_scores
+
+        np.logical_and(
+            batch.active_units[..., :active_limit],
+            controlled_seats[..., None],
+            out=native_active,
+        )
+        np.copyto(native_role, unit_role[..., :active_limit])
+        np.copyto(native_zone, unit_zone[..., :active_limit])
+        np.copyto(native_previous, self._previous_task[..., :active_limit])
+
+        _native_schedule_tasks(
+            np.ascontiguousarray(unit_x, dtype=np.int16),
+            np.ascontiguousarray(unit_y, dtype=np.int16),
+            np.ascontiguousarray(inventories, dtype=np.int64),
+            np.ascontiguousarray(tasks.priority, dtype=np.float32),
+            native_active,
+            np.ascontiguousarray(tasks.active, dtype=np.bool_),
+            np.ascontiguousarray(tasks.exclusive, dtype=np.bool_),
+            np.ascontiguousarray(tasks.target_x, dtype=np.int16),
+            np.ascontiguousarray(tasks.target_y, dtype=np.int16),
+            np.ascontiguousarray(tasks.required_item, dtype=np.int16),
+            np.ascontiguousarray(tasks.required_count, dtype=np.int64),
+            np.ascontiguousarray(tasks.kind, dtype=np.int16),
+            np.ascontiguousarray(tasks.work_role, dtype=np.int16),
+            native_role,
+            native_zone,
+            np.ascontiguousarray(task_zone, dtype=np.int16),
+            float(role_bonus),
+            float(zone_bonus),
+            np.ascontiguousarray(reserved_by_kind, dtype=np.int16),
+            native_previous,
+            float(self.continuity_bonus),
+            int(self.board_size),
+            native_task_index,
+            native_scores,
+        )
+
+        assignments.task_index[..., :active_limit] = native_task_index
+        assignments.score[..., :active_limit] = native_scores
+
+        # Native mode intentionally has no route cache.  Keep the public
+        # counters meaningful so the pit output immediately reveals which path
+        # ran.
+        self.full_solves += int(np.count_nonzero(controlled_seats))
+        self._route_cache.clear()
+        self._route_cache_day.clear()
+        self._route_cache_units.clear()
+        self._force_replan.clear()
 
     def _assign_seat(
         self,
@@ -516,6 +683,10 @@ class TaskScheduler:
 
         routes: list[list[int]] = [[] for _ in range(worker_count)]
         prefix_length = np.zeros(worker_count, dtype=np.int16)
+        # Rebuilt only for the worker whose route changed. The old scheduler
+        # rescanned the complete route for every (task, worker, position)
+        # candidate, which dominated full-solve CPU time.
+        route_eval_cache: list[_RouteEvalCache | None] = [None] * worker_count
 
         eligible = self._eligibility_matrix_fast(
             environment,
@@ -634,13 +805,28 @@ class TaskScheduler:
                             first_position,
                             len(route) + 1,
                         ):
-                            candidate_metrics = self._route_metrics_with_insertion(
+                            route_cache = route_eval_cache[local]
+                            if route_cache is None:
+                                route_cache = self._build_route_eval_cache(
+                                    environment=environment,
+                                    player=player,
+                                    start_x=int(starts_x[local]),
+                                    start_y=int(starts_y[local]),
+                                    route=route,
+                                    tasks=tasks,
+                                    hour=hour,
+                                )
+                                route_eval_cache[local] = route_cache
+
+                            candidate_metrics = self._route_metrics_with_insertion_fast(
                                 environment=environment,
                                 player=player,
                                 worker=worker,
-                                start_x=int(starts_x[local]),
-                                start_y=int(starts_y[local]),
                                 route=route,
+                                route_cache=route_cache,
+                                old_missed=old_missed,
+                                old_length=old_length,
+                                old_preference=old_preference,
                                 insert_task=task,
                                 insert_position=position,
                                 tasks=tasks,
@@ -685,6 +871,7 @@ class TaskScheduler:
                     old_preference = float(route_preference[local])
 
                     routes[local].insert(position, task)
+                    route_eval_cache[local] = None
 
                     new_missed, new_length, new_preference = new_metrics
                     route_missed[local] = new_missed
@@ -1319,7 +1506,181 @@ class TaskScheduler:
             for _, _, local in ranking[:max_workers]
         ]
 
-    def _route_metrics_with_insertion(
+    def _build_route_eval_cache(
+        self,
+        *,
+        environment: int,
+        player: int,
+        start_x: int,
+        start_y: int,
+        route: list[int],
+        tasks: TaskBatch,
+        hour: int,
+    ) -> _RouteEvalCache:
+        """Build route statistics reused by every hypothetical insertion.
+
+        A 10x10 board bounds the extra distance introduced by inserting one
+        task between two route points to 37 turns.  We keep a tiny suffix table
+        over that bounded delta so deadline effects are an O(1) lookup.
+        """
+
+        route_len = len(route)
+        prev_x = np.empty(route_len + 1, dtype=np.int16)
+        prev_y = np.empty(route_len + 1, dtype=np.int16)
+        elapsed_before = np.empty(route_len + 1, dtype=np.int16)
+        completion = np.empty(route_len, dtype=np.int16)
+
+        x = start_x
+        y = start_y
+        elapsed = 0
+        for index, task in enumerate(route):
+            prev_x[index] = x
+            prev_y[index] = y
+            elapsed_before[index] = elapsed
+
+            tx = int(tasks.target_x[environment, player, task])
+            ty = int(tasks.target_y[environment, player, task])
+            elapsed += abs(x - tx) + abs(y - ty) + 1
+            completion[index] = elapsed
+            x = tx
+            y = ty
+
+        prev_x[route_len] = x
+        prev_y[route_len] = y
+        elapsed_before[route_len] = elapsed
+
+        # d(prev,new)+d(new,next)-d(prev,next)+1.  Manhattan distance on a
+        # BxB board is <= 2(B-1), so 4(B-1)+1 is an exact upper bound.
+        max_delta = 4 * (self.board_size - 1) + 1
+        suffix_hist = np.zeros(
+            (route_len + 1, max_delta),
+            dtype=np.int16,
+        )
+
+        for index in range(route_len - 1, -1, -1):
+            suffix_hist[index] = suffix_hist[index + 1]
+            task = route[index]
+            deadline = int(tasks.deadline[environment, player, task])
+            if deadline < 0:
+                continue
+
+            completion_hour = hour + int(completion[index]) - 1
+            slack = deadline - completion_hour
+            # Negative slack means this task is already late and therefore
+            # remains counted in old_missed.  Very large slack cannot be
+            # crossed by a single insertion on this board.
+            if 0 <= slack < max_delta:
+                suffix_hist[index, slack] += 1
+
+        suffix_new_misses = np.zeros(
+            (route_len + 1, max_delta + 1),
+            dtype=np.int16,
+        )
+        if max_delta:
+            # Column d is the number of suffix tasks with slack < d.
+            suffix_new_misses[:, 1:] = np.cumsum(
+                suffix_hist,
+                axis=1,
+                dtype=np.int16,
+            )
+
+        return _RouteEvalCache(
+            prev_x=prev_x,
+            prev_y=prev_y,
+            elapsed_before=elapsed_before,
+            suffix_new_misses=suffix_new_misses,
+        )
+
+    def _route_metrics_with_insertion_fast(
+        self,
+        *,
+        environment: int,
+        player: int,
+        worker: int,
+        route: list[int],
+        route_cache: _RouteEvalCache,
+        old_missed: int,
+        old_length: int,
+        old_preference: float,
+        insert_task: int,
+        insert_position: int,
+        tasks: TaskBatch,
+        unit_role: NDArray[np.int16],
+        unit_zone: NDArray[np.int16],
+        task_zone: NDArray[np.int16],
+        role_bonus: float,
+        zone_bonus: float,
+        hour: int,
+    ) -> tuple[int, int, float]:
+        """Exact V2 insertion objective using cached route statistics."""
+
+        px = int(route_cache.prev_x[insert_position])
+        py = int(route_cache.prev_y[insert_position])
+        elapsed_before = int(route_cache.elapsed_before[insert_position])
+
+        tx = int(tasks.target_x[environment, player, insert_task])
+        ty = int(tasks.target_y[environment, player, insert_task])
+        to_insert = abs(px - tx) + abs(py - ty)
+
+        if insert_position < len(route):
+            next_task = route[insert_position]
+            nx = int(tasks.target_x[environment, player, next_task])
+            ny = int(tasks.target_y[environment, player, next_task])
+            delta = (
+                to_insert
+                + abs(tx - nx)
+                + abs(ty - ny)
+                - abs(px - nx)
+                - abs(py - ny)
+                + 1
+            )
+        else:
+            delta = to_insert + 1
+
+        new_length = old_length + delta
+        inserted_completion = elapsed_before + to_insert + 1
+
+        remaining_turns = self.turns_per_day - hour
+        old_overflow = max(0, old_length - remaining_turns)
+        deadline_misses = old_missed - old_overflow
+
+        deadline = int(tasks.deadline[environment, player, insert_task])
+        completion_hour = hour + inserted_completion - 1
+        if deadline >= 0 and completion_hour > deadline:
+            deadline_misses += 1
+
+        deadline_misses += int(
+            route_cache.suffix_new_misses[insert_position, delta]
+        )
+        new_missed = deadline_misses + max(
+            0,
+            new_length - remaining_turns,
+        )
+
+        preference = old_preference
+        worker_role = int(unit_role[environment, player, worker])
+        task_role = int(tasks.work_role[environment, player, insert_task])
+        if worker_role != int(WorkRole.ANY) and worker_role == task_role:
+            preference += role_bonus
+
+        worker_zone = int(unit_zone[environment, player, worker])
+        if (
+            worker_zone != int(WorkZone.ANY)
+            and worker_zone
+            == int(task_zone[environment, player, insert_task])
+        ):
+            preference += zone_bonus
+
+        if (
+            self._previous_task is not None
+            and insert_task
+            == int(self._previous_task[environment, player, worker])
+        ):
+            preference += self.continuity_bonus
+
+        return new_missed, new_length, preference
+
+    def _route_metrics_with_insertion_reference(
         self,
         *,
         environment: int,

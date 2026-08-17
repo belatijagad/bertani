@@ -1760,6 +1760,8 @@ def build_policy(
     *,
     use_opening: bool = True,
     liquidation_days: int = 1,
+    scheduler_mode: str = "route",
+    profile: bool = False,
 ) -> VectorRulePolicy:
     """Construct the current strategy on the reusable policy engine."""
     resolved = replace(
@@ -1807,6 +1809,8 @@ def build_policy(
                 turns_per_day=resolved.turns_per_day,
             ),
         ),
+        scheduler_mode=scheduler_mode,
+        profile=profile,
     )
 __all__ = [
     "EconomyMarketRule",

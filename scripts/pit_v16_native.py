@@ -87,9 +87,13 @@ def summarize(
 
 
 def run_native_batch(
-    seeds: list[int], baseline: str, weed_spawn_chance: float
-) -> np.ndarray:
-    """Run one independent seed chunk and return paired terminal rewards."""
+    seeds: list[int],
+    baseline: str,
+    weed_spawn_chance: float,
+    scheduler: str = "route",
+    profile: bool = False,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Run one independent seed chunk and return rewards + diagnostics."""
     paired_seeds = np.repeat(np.asarray(seeds, dtype=np.uint64), 2)
     environment = VecEnv(
         len(paired_seeds),
@@ -97,7 +101,7 @@ def run_native_batch(
         weed_spawn_chance=weed_spawn_chance,
     )
     batch = environment.reset(paired_seeds)
-    rule = build_policy()
+    rule = build_policy(scheduler_mode=scheduler, profile=profile)
     v16 = NativeV16Policy(
         load_v16_actions(Path(baseline)),
         max_orders=environment.max_orders,
@@ -108,21 +112,33 @@ def run_native_batch(
     rule_seats = games % 2
     v16_seats = 1 - rule_seats
 
-    # The rule policy used to solve routes for both seats even though the pit
-    # immediately discarded one of them. Keep a stable mask for the whole
-    # episode and ask the scheduler to solve only the seat actually controlled
-    # by the rule agent. This cannot change the game trajectory because the
-    # discarded rule-seat outputs were never submitted to VecEnv.
     rule_seat_mask = np.zeros((len(paired_seeds), 2), dtype=np.bool_)
     rule_seat_mask[games, rule_seats] = True
 
+    rule_ns = 0
+    v16_ns = 0
+    env_ns = 0
     for _ in range(719):
-        rule_actions = rule.act(
-            batch,
-            max_orders=environment.max_orders,
-            seat_mask=rule_seat_mask,
-        )
-        v16_actions = v16.act(batch)
+        if profile:
+            started = time.perf_counter_ns()
+            rule_actions = rule.act(
+                batch,
+                max_orders=environment.max_orders,
+                seat_mask=rule_seat_mask,
+            )
+            rule_ns += time.perf_counter_ns() - started
+
+            started = time.perf_counter_ns()
+            v16_actions = v16.act(batch)
+            v16_ns += time.perf_counter_ns() - started
+        else:
+            rule_actions = rule.act(
+                batch,
+                max_orders=environment.max_orders,
+                seat_mask=rule_seat_mask,
+            )
+            v16_actions = v16.act(batch)
+
         unit_actions[games, rule_seats] = rule_actions.unit_actions[
             games, rule_seats
         ]
@@ -141,10 +157,31 @@ def run_native_batch(
         market_lengths[games, v16_seats] = v16_actions.market_lengths[
             games, v16_seats
         ]
-        batch = environment.step(unit_actions, market_actions, market_lengths)
+
+        if profile:
+            started = time.perf_counter_ns()
+            batch = environment.step(unit_actions, market_actions, market_lengths)
+            env_ns += time.perf_counter_ns() - started
+        else:
+            batch = environment.step(unit_actions, market_actions, market_lengths)
+
     if not batch.dones.all():
         raise RuntimeError("native benchmark did not reach terminal states")
-    return batch.rewards.copy()
+
+    scheduler_obj = rule._task_scheduler
+    diagnostics: dict[str, Any] = {
+        "rule_ns": rule_ns,
+        "v16_ns": v16_ns,
+        "env_ns": env_ns,
+        "rule_profile_ns": dict(rule.profile_ns),
+        "scheduler_full_solves": (
+            0 if scheduler_obj is None else int(scheduler_obj.full_solves)
+        ),
+        "scheduler_cache_hits": (
+            0 if scheduler_obj is None else int(scheduler_obj.cache_hits)
+        ),
+    }
+    return batch.rewards.copy(), diagnostics
 
 
 def main() -> None:
@@ -167,6 +204,20 @@ def main() -> None:
             "parallelism when multiple workers are used)"
         ),
     )
+    parser.add_argument(
+        "--scheduler",
+        choices=("route", "native"),
+        default="route",
+        help=(
+            "task scheduler: current route-aware Python planner or the "
+            "existing Rust priority-greedy fast path"
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="print coarse policy/environment timing diagnostics",
+    )
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument("--json-output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--weed-spawn-chance", type=float, default=0.005)
@@ -184,9 +235,13 @@ def main() -> None:
     ]
     started = time.perf_counter()
     if workers == 1:
-        reward_chunks = [
+        results = [
             run_native_batch(
-                chunks[0], str(args.baseline), args.weed_spawn_chance
+                chunks[0],
+                str(args.baseline),
+                args.weed_spawn_chance,
+                args.scheduler,
+                args.profile,
             )
         ]
     else:
@@ -197,11 +252,15 @@ def main() -> None:
                     chunk,
                     str(args.baseline),
                     args.weed_spawn_chance,
+                    args.scheduler,
+                    args.profile,
                 )
                 for chunk in chunks
             ]
-            reward_chunks = [future.result() for future in futures]
+            results = [future.result() for future in futures]
     elapsed = time.perf_counter() - started
+    reward_chunks = [rewards for rewards, _ in results]
+    diagnostics = [diagnostic for _, diagnostic in results]
     rewards = np.concatenate(reward_chunks, axis=0)
     result = summarize(seeds, rewards, elapsed)
     summary = result["summary"]
@@ -212,8 +271,36 @@ def main() -> None:
     print(
         f"{summary['wins']}W/{summary['ties']}T/{summary['losses']}L; "
         f"mean margin={summary['mean_game_margin']:+.1f}; "
-        f"worst={summary['worst_game_margin']:+.0f}"
+        f"worst={summary['worst_game_margin']:+.0f}; "
+        f"scheduler={args.scheduler}"
     )
+    if args.profile:
+        total_rule_ns = sum(d["rule_ns"] for d in diagnostics)
+        total_v16_ns = sum(d["v16_ns"] for d in diagnostics)
+        total_env_ns = sum(d["env_ns"] for d in diagnostics)
+        component_ns: dict[str, int] = {}
+        for diagnostic in diagnostics:
+            for name, value in diagnostic["rule_profile_ns"].items():
+                component_ns[name] = component_ns.get(name, 0) + int(value)
+        denominator = max(1, total_rule_ns)
+        component_text = ", ".join(
+            f"{name}={value / 1e9:.2f}s ({100.0 * value / denominator:.0f}%)"
+            for name, value in component_ns.items()
+            if value
+        )
+        print(
+            "profile summed worker CPU: "
+            f"rule={total_rule_ns / 1e9:.2f}s, "
+            f"v16={total_v16_ns / 1e9:.2f}s, "
+            f"env={total_env_ns / 1e9:.2f}s"
+        )
+        if component_text:
+            print(f"rule components: {component_text}")
+        print(
+            "scheduler calls: "
+            f"full_solves={sum(d['scheduler_full_solves'] for d in diagnostics)}, "
+            f"cache_hits={sum(d['scheduler_cache_hits'] for d in diagnostics)}"
+        )
     output = args.json_output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n")
@@ -222,4 +309,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    

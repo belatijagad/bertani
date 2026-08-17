@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
+import time
 
 import numpy as np
 from numpy.typing import NDArray
@@ -159,8 +160,21 @@ class VectorRulePolicy:
         task_rules: tuple[TaskRule, ...] | None = None,
         market_rules: tuple[MarketRule, ...] | None = None,
         workforce_planner: WorkforcePlanner | None = None,
+        scheduler_mode: str = "route",
+        profile: bool = False,
     ) -> None:
         self.config = config or RuleConfig()
+        self.scheduler_mode = scheduler_mode
+        self.profile = profile
+        self.profile_ns: dict[str, int] = {
+            "opening": 0,
+            "features_intent": 0,
+            "task_rules": 0,
+            "workforce": 0,
+            "scheduler": 0,
+            "executor": 0,
+            "market": 0,
+        }
         self.intent_planner = intent_planner
         self.opening_controller = opening_controller
         self.last_opening_diagnostics: OpeningDiagnostics | None = None
@@ -218,16 +232,20 @@ class VectorRulePolicy:
             self.opening_controller is not None
             and self.opening_controller.active_mask(batch).all()
         ):
+            started = time.perf_counter_ns() if self.profile else 0
             self.last_opening_diagnostics = self.opening_controller.apply(
                 batch,
                 actions.unit_actions,
                 actions.market_actions,
                 actions.market_lengths,
             )
+            if self.profile:
+                self.profile_ns["opening"] += time.perf_counter_ns() - started
             self.last_tasks = None
             self.last_assignments = None
             return actions
 
+        started = time.perf_counter_ns() if self.profile else 0
         features = self.extract_features(batch)
         planner_from_features = getattr(
             self.intent_planner, "from_features", None
@@ -236,30 +254,48 @@ class VectorRulePolicy:
             intent = planner_from_features(batch, features)
         else:
             intent = self.plan(batch)
+        if self.profile:
+            self.profile_ns["features_intent"] += time.perf_counter_ns() - started
 
         tasks = self._task_buffers(batch)
         tasks.clear()
+        started = time.perf_counter_ns() if self.profile else 0
         for rule in self.task_rules:
             rule.propose(batch, intent, tasks)
+        if self.profile:
+            self.profile_ns["task_rules"] += time.perf_counter_ns() - started
+
         assert self._task_scheduler is not None
         assert self._task_executor is not None
+        started = time.perf_counter_ns() if self.profile else 0
         workforce = (
             self.workforce_planner(batch, intent, tasks)
             if self.workforce_planner is not None
             else None
         )
+        if self.profile:
+            self.profile_ns["workforce"] += time.perf_counter_ns() - started
+
+        started = time.perf_counter_ns() if self.profile else 0
         assignments = self._task_scheduler.assign(
             batch,
             tasks,
             workforce,
             seat_mask=seat_mask,
         )
+        if self.profile:
+            self.profile_ns["scheduler"] += time.perf_counter_ns() - started
+
+        started = time.perf_counter_ns() if self.profile else 0
         self._task_executor.execute(
             batch, tasks, assignments, actions.unit_actions
         )
+        if self.profile:
+            self.profile_ns["executor"] += time.perf_counter_ns() - started
         self.last_tasks = tasks
         self.last_assignments = assignments
 
+        started = time.perf_counter_ns() if self.profile else 0
         self._append_liquidation_sales(features, intent, self.last_market_plan)
         for rule in self.market_rules:
             rule.propose(batch, intent, self.last_market_plan)
@@ -272,6 +308,8 @@ class VectorRulePolicy:
             )
         else:
             self.last_opening_diagnostics = None
+        if self.profile:
+            self.profile_ns["market"] += time.perf_counter_ns() - started
         return actions
 
     def _task_buffers(self, batch: Batch) -> TaskBatch:
@@ -285,6 +323,7 @@ class VectorRulePolicy:
                 shed_capacity=self.config.shed_capacity,
                 episode_steps=self.config.episode_steps,
                 turns_per_day=self.config.turns_per_day,
+                scheduler_mode=self.scheduler_mode,
             )
             self._task_executor = TaskExecutor(board_size)
         return self.last_tasks
