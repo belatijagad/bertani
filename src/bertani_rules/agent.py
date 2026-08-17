@@ -508,6 +508,7 @@ class TerritorialWorkforcePlanner:
             batch.observation_views.global_features[..., 0] * self.last_step
         ).astype(np.int64)
         day = step // self.turns_per_day
+        hour = step % self.turns_per_day
         if self._zone_shape != shape:
             self._daily_zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
             self._last_day = np.full(shape[:2], -1, dtype=np.int64)
@@ -560,11 +561,29 @@ class TerritorialWorkforcePlanner:
         role[active & carrying_anything] = WorkRole.LOGISTICS
         role[active & carrying_animal] = WorkRole.LIVESTOCK
 
+        plant_backlog = (
+            tasks.active & (tasks.kind == TaskKind.PLANT)
+        ).sum(axis=-1)
+        active_count = active.sum(axis=-1)
+        reserved_by_kind = np.zeros(
+            (*shape[:2], max(TaskKind) + 1), dtype=np.int16
+        )
+        reserve_planting = (
+            (day >= 14)
+            & (hour < self.turns_per_day - 4)
+            & (plant_backlog >= 8)
+            & (active_count >= 8)
+        )
+        reserved_by_kind[..., TaskKind.PLANT] = reserve_planting.astype(
+            np.int16
+        )
+
         return WorkforcePlan(
             role=role,
             zone=zone,
             role_bonus=self.role_bonus,
             zone_bonus=self.zone_bonus,
+            reserved_by_kind=reserved_by_kind,
         )
 
 

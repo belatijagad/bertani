@@ -344,3 +344,35 @@ def test_workforce_zones_follow_quadrant_demand_without_intraday_thrashing() -> 
     batch.observation_views.global_features[..., 0] = 24 / 719
     third = planner(batch, intent, tasks)
     assert np.count_nonzero(third.zone[0, 0, 1:5] == WorkZone.SW) == 4
+
+
+@pytest.mark.parametrize("use_native", (True, False))
+def test_capacity_reservation_keeps_a_planting_lane_below_harvest(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
+    env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
+    batch = env.reset()
+    batch.active_units[0, 0, :4] = True
+    tasks = TaskBatch.allocate(1, 2, env.board_size)
+    harvest = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
+    plant = np.zeros_like(harvest)
+    harvest[0, 0, 0, :4] = True
+    plant[0, 0, 1, 0] = True
+    tasks.propose_tiles(TaskKind.HARVEST, harvest, 110.0)
+    tasks.propose_tiles(TaskKind.PLANT, plant, 105.0)
+    reserved = np.zeros((1, 2, max(TaskKind) + 1), dtype=np.int16)
+    reserved[0, 0, TaskKind.PLANT] = 1
+    workforce = WorkforcePlan(
+        role=np.full(batch.active_units.shape, WorkRole.ANY, dtype=np.int16),
+        zone=np.full(batch.active_units.shape, WorkZone.ANY, dtype=np.int16),
+        reserved_by_kind=reserved,
+    )
+
+    assignments = TaskScheduler(env.board_size).assign(batch, tasks, workforce)
+    assigned = assignments.task_index[0, 0, :4]
+    kinds = tasks.kind[0, 0, assigned]
+    assert np.count_nonzero(kinds == TaskKind.HARVEST) == 3
+    assert np.count_nonzero(kinds == TaskKind.PLANT) == 1

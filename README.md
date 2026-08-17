@@ -74,7 +74,10 @@ track market actions and resource reservations. The intent planner is
 replaceable, so a learned planner can later retain deterministic legality,
 logistics, and action encoding. Within a day, the scheduler retains a worker's
 valid task as a small tie-breaker, allowing tile workflows such as harvest and
-replant to continue without blocking higher-urgency survival work. See
+replant to continue without blocking higher-urgency survival work. Workforce
+plans can also reserve bounded capacity for lower-tier task kinds; the current
+policy keeps one planting lane open when at least eight seed-backed jobs are
+waiting, while urgency bands 12 and above retain the whole workforce. See
 [the rule-based agent architecture](docs/rule-based-agent.md).
 
 Run validation with:

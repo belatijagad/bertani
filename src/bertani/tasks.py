@@ -70,6 +70,7 @@ class WorkforcePlan:
     zone: NDArray[np.int16]
     role_bonus: float = 4.0
     zone_bonus: float = 3.0
+    reserved_by_kind: NDArray[np.int16] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +330,19 @@ class TaskScheduler:
             unit_zone = np.ascontiguousarray(workforce.zone, dtype=np.int16)
             role_bonus = workforce.role_bonus
             zone_bonus = workforce.zone_bonus
+        if workforce is None or workforce.reserved_by_kind is None:
+            reserved_by_kind = np.zeros(
+                (*shape[:2], max(TaskKind) + 1), dtype=np.int16
+            )
+        else:
+            expected = (*shape[:2], max(TaskKind) + 1)
+            if workforce.reserved_by_kind.shape != expected:
+                raise ValueError(
+                    f"capacity reservation must have shape {expected}"
+                )
+            reserved_by_kind = np.ascontiguousarray(
+                workforce.reserved_by_kind, dtype=np.int16
+            )
 
         half = self.board_size // 2
         task_zone = (
@@ -356,6 +370,7 @@ class TaskScheduler:
                 task_zone,
                 role_bonus,
                 zone_bonus,
+                reserved_by_kind,
                 self._previous_task,
                 self.continuity_bonus,
                 tasks.board_size,
@@ -400,7 +415,9 @@ class TaskScheduler:
             carrying_anything = inventories.sum(axis=-1) > 0
             eligible &= ~deposit[..., None, :] | carrying_anything[..., None]
             scores[~eligible] = -np.inf
-            self._assign_python(batch, tasks, scores, assignments)
+            self._assign_python(
+                batch, tasks, scores, assignments, reserved_by_kind
+            )
             self._prefer_unclaimed_local_tasks(
                 batch,
                 tasks,
@@ -565,6 +582,7 @@ class TaskScheduler:
         tasks: TaskBatch,
         scores: NDArray[np.float32],
         assignments: TaskAssignments,
+        reserved_by_kind: NDArray[np.int16],
     ) -> None:
         """Portable fallback used by submission archives without the extension."""
 
@@ -581,7 +599,24 @@ class TaskScheduler:
                     tier_tasks = set(
                         active_tasks[urgency == urgency_band].tolist()
                     )
-                    while available_units and tier_tasks:
+                    lower_tasks = active_tasks[urgency < urgency_band]
+                    future_reserve = 0
+                    for kind in range(reserved_by_kind.shape[-1]):
+                        if urgency_band >= 12:
+                            break
+                        requested = int(
+                            reserved_by_kind[environment, player, kind]
+                        )
+                        if requested <= 0:
+                            continue
+                        available_kind = int(
+                            np.count_nonzero(
+                                tasks.kind[environment, player, lower_tasks]
+                                == kind
+                            )
+                        )
+                        future_reserve += min(requested, available_kind)
+                    while len(available_units) > future_reserve and tier_tasks:
                         candidates = np.asarray(sorted(available_units), dtype=np.int64)
                         candidate_tasks = np.asarray(sorted(tier_tasks), dtype=np.int64)
                         tier_scores = scores[environment, player][

@@ -33,6 +33,7 @@ pub(crate) fn schedule_tasks<'py>(
     task_zone: Bound<'py, PyArray3<i16>>,
     role_bonus: f32,
     zone_bonus: f32,
+    reserved_by_kind: Bound<'py, PyArray3<i16>>,
     previous_task: Bound<'py, PyArray3<i64>>,
     continuity_bonus: f32,
     board_size: usize,
@@ -75,6 +76,11 @@ pub(crate) fn schedule_tasks<'py>(
         ("unit_role", unit_role.shape(), unit_shape.as_slice()),
         ("unit_zone", unit_zone.shape(), unit_shape.as_slice()),
         ("task_zone", task_zone.shape(), task_shape.as_slice()),
+        (
+            "reserved_by_kind",
+            reserved_by_kind.shape(),
+            [environments, players, 14].as_slice(),
+        ),
         (
             "previous_task",
             previous_task.shape(),
@@ -122,6 +128,7 @@ pub(crate) fn schedule_tasks<'py>(
         ("unit_role", unit_role.is_c_contiguous()),
         ("unit_zone", unit_zone.is_c_contiguous()),
         ("task_zone", task_zone.is_c_contiguous()),
+        ("reserved_by_kind", reserved_by_kind.is_c_contiguous()),
         ("previous_task", previous_task.is_c_contiguous()),
         ("task_index", task_index.is_c_contiguous()),
         ("output_scores", output_scores.is_c_contiguous()),
@@ -149,6 +156,7 @@ pub(crate) fn schedule_tasks<'py>(
     let unit_role_guard = unit_role.try_readonly()?;
     let unit_zone_guard = unit_zone.try_readonly()?;
     let task_zone_guard = task_zone.try_readonly()?;
+    let reserved_by_kind_guard = reserved_by_kind.try_readonly()?;
     let previous_task_guard = previous_task.try_readonly()?;
     let unit_x = unit_x_guard.as_slice()?;
     let unit_y = unit_y_guard.as_slice()?;
@@ -166,6 +174,7 @@ pub(crate) fn schedule_tasks<'py>(
     let unit_role = unit_role_guard.as_slice()?;
     let unit_zone = unit_zone_guard.as_slice()?;
     let task_zone = task_zone_guard.as_slice()?;
+    let reserved_by_kind = reserved_by_kind_guard.as_slice()?;
     let previous_task = previous_task_guard.as_slice()?;
     let mut task_index = task_index.try_readwrite()?;
     let mut output_scores = output_scores.try_readwrite()?;
@@ -202,7 +211,30 @@ pub(crate) fn schedule_tasks<'py>(
             }
             let tier = &ordered_tasks[tier_start..tier_end];
             let mut task_available = vec![true; tier.len()];
-            loop {
+            let mut lower_kind_count = [0usize; 14];
+            for &task in &ordered_tasks[tier_end..] {
+                if let Ok(kind) = usize::try_from(task_kind[task_start + task]) {
+                    if kind < lower_kind_count.len() {
+                        lower_kind_count[kind] += 1;
+                    }
+                }
+            }
+            let reserve_start = farm * 14;
+            let future_reserve = if priority >= 12.0 {
+                0
+            } else {
+                lower_kind_count
+                    .iter()
+                    .enumerate()
+                    .map(|(kind, &count)| {
+                        count.min(
+                            usize::try_from(reserved_by_kind[reserve_start + kind].max(0))
+                                .unwrap_or(0),
+                        )
+                    })
+                    .sum::<usize>()
+            };
+            while available.iter().filter(|&&value| value).count() > future_reserve {
                 let mut best: Option<(usize, usize, f32)> = None;
                 for unit in 0..units {
                     if !available[unit] {
