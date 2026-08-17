@@ -17,6 +17,11 @@ import time
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    from ._rust import extract_rule_features as _native_extract_rule_features
+except (ImportError, ModuleNotFoundError):
+    _native_extract_rule_features = None
+
 from .market import MarketPlanBatch, MarketRule
 from .opening import OpeningController, OpeningDiagnostics
 from .tasks import (
@@ -81,6 +86,8 @@ class RuleFeatures:
     animal_counts: Int64Array
     shed: Int64Array
     seeds: Int64Array
+    shop_counts: Int64Array
+    opponent_crop_counts: Int64Array
     market_price_ratios: NDArray[np.float32]
 
 
@@ -106,40 +113,61 @@ class RuleActions:
     market_lengths: Int64Array
 
 
-def extract_rule_features(batch: Batch, config: RuleConfig) -> RuleFeatures:
-    """Extract version-neutral dense features from the stable batch layout."""
+def extract_rule_features(
+    batch: Batch,
+    config: RuleConfig,
+    out: RuleFeatures | None = None,
+) -> RuleFeatures:
+    """Extract dense rule features through the native typed reduction kernel.
+
+    ``out`` allows the vector policy to reuse every materialized feature
+    buffer across turns, avoiding Python allocation and reduction overhead.
+    """
+
+    if _native_extract_rule_features is None:
+        raise RuntimeError(
+            "native rule feature extraction requires the bertani._rust extension"
+        )
 
     views = batch.observation_views
-    global_features = views.global_features
-    own_farms = views.farms[:, :, 0]
-    own_tiles = views.tiles[:, :, 0]
+    shape = batch.active_units.shape[:2]
+    if out is None or out.step.shape != shape:
+        out = RuleFeatures(
+            step=np.empty(shape, dtype=np.int64),
+            day=np.empty(shape, dtype=np.int64),
+            hour=np.empty(shape, dtype=np.int64),
+            money=np.empty(shape, dtype=np.float64),
+            crop_counts=np.empty((*shape, 5), dtype=np.int64),
+            animal_counts=np.empty((*shape, 3), dtype=np.int64),
+            shed=np.empty((*shape, 12), dtype=np.int64),
+            seeds=np.empty((*shape, 5), dtype=np.int64),
+            shop_counts=np.empty((*shape, 8), dtype=np.int64),
+            opponent_crop_counts=np.empty((*shape, 5), dtype=np.int64),
+            market_price_ratios=np.empty((*shape, 9), dtype=np.float32),
+        )
 
-    last_step = max(1, config.episode_steps - 1)
-    step = np.rint(global_features[..., 0] * last_step).astype(np.int64)
-    day = step // config.turns_per_day
-    hour = step % config.turns_per_day
-    money = own_farms[..., 0].astype(np.float64) * config.starting_money
-    crop_counts = np.rint(own_tiles[..., 9:14].sum(axis=(2, 3))).astype(
-        np.int64
+    _native_extract_rule_features(
+        views.global_features,
+        views.farms,
+        views.tiles,
+        views.private,
+        out.step,
+        out.day,
+        out.hour,
+        out.money,
+        out.crop_counts,
+        out.animal_counts,
+        out.shed,
+        out.seeds,
+        out.shop_counts,
+        out.opponent_crop_counts,
+        out.market_price_ratios,
+        config.episode_steps,
+        config.turns_per_day,
+        config.starting_money,
+        config.shed_capacity,
     )
-    animal_counts = np.rint(own_tiles[..., 6:9].sum(axis=(2, 3))).astype(
-        np.int64
-    )
-    shed = np.rint(views.private[..., :12] * config.shed_capacity).astype(
-        np.int64
-    )
-    seeds = np.rint(views.private[..., 12:17] * 10).astype(np.int64)
-    return RuleFeatures(
-        step=step,
-        day=day,
-        hour=hour,
-        money=money,
-        crop_counts=crop_counts,
-        animal_counts=animal_counts,
-        shed=shed,
-        seeds=seeds,
-        market_price_ratios=global_features[..., 5:22:2],
-    )
+    return out
 
 
 class VectorRulePolicy:
@@ -166,7 +194,8 @@ class VectorRulePolicy:
         self.profile = profile
         self.profile_ns: dict[str, int] = {
             "opening": 0,
-            "features_intent": 0,
+            "features": 0,
+            "intent": 0,
             "maintenance_tasks": 0,
             "production_tasks": 0,
             "farm_tasks": 0,
@@ -188,12 +217,14 @@ class VectorRulePolicy:
         self.last_assignments: TaskAssignments | None = None
         self._shape: tuple[int, int, int, int] | None = None
         self._actions: RuleActions | None = None
+        self._features: RuleFeatures | None = None
         self.last_market_plan: MarketPlanBatch | None = None
 
     def extract_features(self, batch: Batch) -> RuleFeatures:
         """Extract planner features with batch-wide NumPy operations."""
 
-        return extract_rule_features(batch, self.config)
+        self._features = extract_rule_features(batch, self.config, self._features)
+        return self._features
 
     def plan(self, batch: Batch) -> StrategicIntent:
         """Produce high-level intent for every environment and player."""
@@ -248,6 +279,10 @@ class VectorRulePolicy:
 
         started = time.perf_counter_ns() if self.profile else 0
         features = self.extract_features(batch)
+        if self.profile:
+            self.profile_ns["features"] += time.perf_counter_ns() - started
+
+        started = time.perf_counter_ns() if self.profile else 0
         planner_from_features = getattr(
             self.intent_planner, "from_features", None
         )
@@ -256,7 +291,7 @@ class VectorRulePolicy:
         else:
             intent = self.plan(batch)
         if self.profile:
-            self.profile_ns["features_intent"] += time.perf_counter_ns() - started
+            self.profile_ns["intent"] += time.perf_counter_ns() - started
 
         tasks = self._task_buffers(batch)
         tasks.clear()
@@ -275,11 +310,14 @@ class VectorRulePolicy:
         assert self._task_scheduler is not None
         assert self._task_executor is not None
         started = time.perf_counter_ns() if self.profile else 0
-        workforce = (
-            self.workforce_planner(batch, intent, tasks)
-            if self.workforce_planner is not None
-            else None
-        )
+        if self.workforce_planner is None:
+            workforce = None
+        else:
+            masked_workforce = getattr(self.workforce_planner, "plan_masked", None)
+            if seat_mask is not None and masked_workforce is not None:
+                workforce = masked_workforce(batch, intent, tasks, seat_mask)
+            else:
+                workforce = self.workforce_planner(batch, intent, tasks)
         if self.profile:
             self.profile_ns["workforce"] += time.perf_counter_ns() - started
 

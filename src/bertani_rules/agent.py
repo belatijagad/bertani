@@ -11,6 +11,11 @@ from dataclasses import replace
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    from bertani._rust import NativeWorkforcePlanner as _NativeWorkforcePlanner
+except (ImportError, ModuleNotFoundError):
+    _NativeWorkforcePlanner = None
+
 from bertani.market import MarketPlanBatch, propose_native_rule_market
 from bertani.opening import OpeningController, OpeningTurn
 from bertani.rule_based import (
@@ -29,8 +34,6 @@ from bertani.tasks import (
     propose_native_farm_tasks,
     propose_native_maintenance_tasks,
     propose_native_production_tasks,
-    WorkRole,
-    WorkZone,
 )
 from bertani.vec_env import Batch, Item
 
@@ -151,9 +154,7 @@ class IntentPlanner:
         phase = np.full(shape, RulePhase.MIDGAME, dtype=np.int8)
         phase[features.day < 3] = RulePhase.OPENING
         phase[features.day >= liquidation_start] = RulePhase.LIQUIDATION
-        shops = np.rint(
-            batch.observation_views.global_features[..., 22:30] * 8
-        ).astype(np.int64)
+        shops = features.shop_counts
         # The leader commits to Yarn only when it appears among the first four
         # shop draws. Later Yarn unlocks do not rebuild an established dairy
         # farm. Sheep count latches the branch after that decision point.
@@ -165,10 +166,7 @@ class IntentPlanner:
             ((features.day <= 12) & (shops[..., 7] >= 2))
             | (features.animal_counts[..., 2] > 8)
         )
-        opponent_tiles = batch.observation_views.tiles[:, :, 1]
-        opponent_crops = np.rint(
-            opponent_tiles[..., 9:14].sum(axis=(2, 3))
-        ).astype(np.int64)
+        opponent_crops = features.opponent_crop_counts
         # The reference player uses two visibly different expansion books.
         # A wheat/livestock-heavy rival is answered with a 20-Melon cash
         # cohort.  Against another Melon/dairy opening it keeps only twelve
@@ -384,7 +382,7 @@ class IntentPlanner:
 
 
 class TerritorialWorkforcePlanner:
-    """Allocate crews to quadrants in proportion to their live task backlog."""
+    """Thin Python wrapper around the persistent native workforce planner."""
 
     def __init__(
         self,
@@ -394,14 +392,19 @@ class TerritorialWorkforcePlanner:
         role_bonus: float = 0.0,
         zone_bonus: float = 0.0,
     ) -> None:
-        self.shed_capacity = shed_capacity
-        self.turns_per_day = turns_per_day
-        self.last_step = max(1, episode_steps - 1)
+        if _NativeWorkforcePlanner is None:
+            raise RuntimeError(
+                "native workforce planning requires the bertani._rust extension"
+            )
         self.role_bonus = role_bonus
         self.zone_bonus = zone_bonus
-        self._zone_shape: tuple[int, int, int] | None = None
-        self._daily_zone: NDArray[np.int16] | None = None
-        self._last_day: NDArray[np.int64] | None = None
+        self._native = _NativeWorkforcePlanner(
+            shed_capacity, turns_per_day, episode_steps
+        )
+        self._shape: tuple[int, int, int] | None = None
+        self._role: NDArray[np.int16] | None = None
+        self._zone: NDArray[np.int16] | None = None
+        self._reserved: NDArray[np.int16] | None = None
 
     def __call__(
         self,
@@ -410,168 +413,55 @@ class TerritorialWorkforcePlanner:
         tasks: TaskBatch,
     ) -> WorkforcePlan:
         del intent
-        active = batch.active_units
-        shape = active.shape
-        active_slots = np.flatnonzero(np.any(active, axis=(0, 1)))
-        active_limit = int(active_slots[-1]) + 1 if active_slots.size else 0
-        active_prefix = active[..., :active_limit]
-
-        role = np.full(shape, WorkRole.ANY, dtype=np.int16)
-        zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
-        role_prefix = role[..., :active_limit]
-        zone_prefix = zone[..., :active_limit]
-        unit_index = np.arange(active_limit, dtype=np.int16)[None, None, :]
-
-        tiles = batch.observation_views.tiles[:, :, 0]
-        animals = np.rint(tiles[..., 6:9].sum(axis=(2, 3))).astype(np.int16)
-        animal_total = animals.sum(axis=-1)
-        livestock_workers = np.where(
-            animal_total > 0,
-            np.clip((animal_total + 3) // 4, 1, 3),
-            0,
-        ).astype(np.int16)
-
-        logistics = active_prefix & (unit_index == 0)
-        livestock = active_prefix & (unit_index >= 1) & (
-            unit_index <= livestock_workers[..., None]
-        )
-        field = active_prefix & ~logistics & ~livestock
-        role_prefix[logistics] = WorkRole.LOGISTICS
-        role_prefix[livestock] = WorkRole.LIVESTOCK
-        role_prefix[field] = WorkRole.FIELD
-
-        farms = batch.observation_views.farms[:, :, 0]
-        unlocked = np.rint(farms[..., 4:8]).astype(np.bool_)
-
-        # Estimate one-turn workload rather than splitting workers evenly.
-        # Survival and harvest jobs receive extra mass because delaying them can
-        # destroy assets or block the following planting job.  Weeds and empty
-        # tiles therefore attract workers naturally when their backlog grows.
-        kind = tasks.kind
-        weight = np.ones_like(tasks.priority, dtype=np.float32)
-        weight += np.isin(
-            kind,
-            (TaskKind.WATER, TaskKind.FEED, TaskKind.CARE),
-        ).astype(np.float32)
-        weight += 0.5 * np.isin(
-            kind,
-            (TaskKind.HARVEST, TaskKind.CLEAR_WEED, TaskKind.PLANT),
-        ).astype(np.float32)
-        task_slots = np.arange(tasks.capacity)[None, None, :]
-        tile_task = task_slots < tasks.tile_slots
-        task_zone = (
-            (tasks.target_y >= tasks.board_size // 2).astype(np.int16) * 2
-            + (tasks.target_x >= tasks.board_size // 2).astype(np.int16)
-        )
-        demand = np.zeros((*shape[:2], 4), dtype=np.float32)
-        for quadrant in range(4):
-            in_quadrant = (
-                tasks.active
-                & tile_task
-                & (task_zone == quadrant)
-                & (tasks.work_role != WorkRole.LOGISTICS)
+        shape = batch.active_units.shape
+        if self._shape != shape:
+            self._role = np.empty(shape, dtype=np.int16)
+            self._zone = np.empty(shape, dtype=np.int16)
+            self._reserved = np.empty(
+                (*shape[:2], max(TaskKind) + 1), dtype=np.int16
             )
-            demand[..., quadrant] = (weight * in_quadrant).sum(axis=-1)
+            self._shape = shape
+        assert self._role is not None
+        assert self._zone is not None
+        assert self._reserved is not None
 
-        demand = np.where(unlocked, demand, 0.0)
-
-        territory_workers = active_prefix & ~logistics
-        total_demand = demand.sum(axis=-1)
-        fallback = unlocked.astype(np.float32)
-        effective_demand = np.where(
-            (total_demand > 0)[..., None], demand, fallback
+        views = batch.observation_views
+        self._native.plan(
+            views.global_features,
+            views.farms,
+            views.tiles,
+            views.units,
+            batch.active_units,
+            tasks.active,
+            tasks.kind,
+            tasks.target_x,
+            tasks.target_y,
+            tasks.work_role,
+            self._role,
+            self._zone,
+            self._reserved,
+            tasks.board_size,
         )
-        step = np.rint(
-            batch.observation_views.global_features[..., 0] * self.last_step
-        ).astype(np.int64)
-        day = step // self.turns_per_day
-        hour = step % self.turns_per_day
-        if self._zone_shape != shape:
-            self._daily_zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
-            self._last_day = np.full(shape[:2], -1, dtype=np.int64)
-            self._zone_shape = shape
-        assert self._daily_zone is not None
-        assert self._last_day is not None
-        new_day = day != self._last_day
-        self._daily_zone[new_day] = WorkZone.ANY
-        self._daily_zone[~active] = WorkZone.ANY
-        self._last_day[...] = day
-
-        # Assign each newly hired worker to the quadrant with the highest
-        # remaining demand per assigned worker. Keep that territory for the
-        # rest of the day so a changing task list cannot make routes thrash.
-        #
-        # Only the live unit prefix participates here. The native observation
-        # buffer reserves 231 slots, but the policy normally uses around a
-        # dozen workers; iterating every padded slot dominated this planner.
-        daily_zone_prefix = self._daily_zone[..., :active_limit]
-        assigned_count = np.stack(
-            [
-                ((daily_zone_prefix == quadrant) & territory_workers).sum(
-                    axis=-1
-                )
-                for quadrant in range(4)
-            ],
-            axis=-1,
-        ).astype(np.float32)
-        for worker_raw in active_slots:
-            worker = int(worker_raw)
-            if worker == 0:
-                continue
-            needs_zone = territory_workers[..., worker] & (
-                daily_zone_prefix[..., worker] == WorkZone.ANY
-            )
-            if not np.any(needs_zone):
-                continue
-            pressure = effective_demand / (assigned_count + 1.0)
-            chosen = np.argmax(pressure, axis=-1).astype(np.int16)
-            daily_zone_prefix[..., worker] = np.where(
-                needs_zone, chosen, daily_zone_prefix[..., worker]
-            )
-            for quadrant in range(4):
-                assigned_count[..., quadrant] += needs_zone & (
-                    chosen == quadrant
-                )
-        zone_prefix[territory_workers] = daily_zone_prefix[territory_workers]
-
-        # Inventory state overrides the default daily role. A worker already
-        # carrying an animal should finish pasture placement; any other loaded
-        # worker should complete the short shed route before returning afield.
-        units = batch.observation_views.units[:, :, 0, :active_limit]
-        inventories = np.rint(
-            units[..., 5:17] * self.shed_capacity
-        ).astype(np.int64)
-        carrying_animal = inventories[..., Item.COW : Item.SHEEP + 1].sum(
-            axis=-1
-        ) > 0
-        carrying_anything = inventories.sum(axis=-1) > 0
-        role_prefix[active_prefix & carrying_anything] = WorkRole.LOGISTICS
-        role_prefix[active_prefix & carrying_animal] = WorkRole.LIVESTOCK
-
-        plant_backlog = (
-            tasks.active & (tasks.kind == TaskKind.PLANT)
-        ).sum(axis=-1)
-        active_count = active_prefix.sum(axis=-1)
-        reserved_by_kind = np.zeros(
-            (*shape[:2], max(TaskKind) + 1), dtype=np.int16
-        )
-        reserve_planting = (
-            (day >= 14)
-            & (hour < self.turns_per_day - 4)
-            & (plant_backlog >= 8)
-            & (active_count >= 8)
-        )
-        reserved_by_kind[..., TaskKind.PLANT] = reserve_planting.astype(
-            np.int16
-        )
-
         return WorkforcePlan(
-            role=role,
-            zone=zone,
+            role=self._role,
+            zone=self._zone,
             role_bonus=self.role_bonus,
             zone_bonus=self.zone_bonus,
-            reserved_by_kind=reserved_by_kind,
+            reserved_by_kind=self._reserved,
         )
+
+    def plan_masked(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        seat_mask: NDArray[np.bool_],
+    ) -> WorkforcePlan:
+        # Workforce state is cheap in Rust and day-persistent. Keep all seats
+        # synchronized so a later change in controlled seat cannot inherit
+        # stale territory state. The expensive Python implementation is gone.
+        del seat_mask
+        return self(batch, intent, tasks)
 
 
 class FarmTaskRule:
