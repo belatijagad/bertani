@@ -3,6 +3,7 @@
 mod action;
 mod encoding;
 mod maintenance_tasks;
+mod production_tasks;
 mod route_scheduler;
 mod snapshot;
 mod vec_env;
@@ -16,6 +17,9 @@ mod _rust {
 
     #[pymodule_export]
     use super::maintenance_tasks::propose_maintenance_tasks;
+
+    #[pymodule_export]
+    use super::production_tasks::propose_production_tasks;
 
     #[pymodule_export]
     use super::route_scheduler::schedule_routes;

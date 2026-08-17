@@ -11,9 +11,11 @@ from numpy.typing import NDArray
 
 try:
     from ._rust import propose_maintenance_tasks as _propose_maintenance_tasks
+    from ._rust import propose_production_tasks as _propose_production_tasks
     from ._rust import schedule_routes as _schedule_routes
 except (ImportError, ModuleNotFoundError):
     _propose_maintenance_tasks = None
+    _propose_production_tasks = None
     _schedule_routes = None
 
 from .vec_env import Batch, Item, UnitOp
@@ -293,6 +295,55 @@ def propose_native_maintenance_tasks(
         episode_steps,
     )
 
+
+
+def propose_native_production_tasks(
+    batch: Batch,
+    intent: StrategicIntent,
+    tasks: TaskBatch,
+    *,
+    turns_per_day: int,
+    shed_capacity: int,
+    episode_steps: int,
+) -> None:
+    """Populate deterministic production tasks through the native kernel.
+
+    Strategic targets remain in Python; Rust only maps those targets to exact
+    tile/logistics tasks using the current farm state.
+    """
+    if _propose_production_tasks is None:
+        raise RuntimeError(
+            "native production tasks require the bertani._rust extension"
+        )
+    views = batch.observation_views
+    _propose_production_tasks(
+        views.tiles,
+        views.global_features,
+        views.units,
+        views.private,
+        batch.active_units,
+        np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
+        tasks.active,
+        tasks.kind,
+        tasks.target_x,
+        tasks.target_y,
+        tasks.item,
+        tasks.quantity,
+        tasks.priority,
+        tasks.deadline,
+        tasks.estimated_value,
+        tasks.required_item,
+        tasks.required_count,
+        tasks.exclusive,
+        tasks.work_role,
+        tasks.board_size,
+        tasks.tile_slots,
+        turns_per_day,
+        shed_capacity,
+        episode_steps,
+    )
 
 @dataclass(frozen=True, slots=True)
 class TaskAssignments:
