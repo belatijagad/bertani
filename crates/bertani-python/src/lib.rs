@@ -3,6 +3,7 @@
 mod action;
 mod encoding;
 mod maintenance_tasks;
+mod market_rule;
 mod production_tasks;
 mod route_scheduler;
 mod snapshot;
@@ -17,6 +18,9 @@ mod _rust {
 
     #[pymodule_export]
     use super::maintenance_tasks::propose_maintenance_tasks;
+
+    #[pymodule_export]
+    use super::market_rule::propose_rule_market;
 
     #[pymodule_export]
     use super::production_tasks::propose_production_tasks;

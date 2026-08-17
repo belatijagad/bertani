@@ -10,6 +10,12 @@ from numpy.typing import NDArray
 
 from .vec_env import Batch, Item, MarketOp
 
+try:
+    from ._rust import propose_rule_market as _propose_rule_market
+except (ImportError, ModuleNotFoundError):
+    _propose_rule_market = None
+
+
 if TYPE_CHECKING:
     from .rule_based import StrategicIntent
 
@@ -113,6 +119,48 @@ class MarketPlanBatch:
             raise ValueError(f"market plan mask must have shape {self.lengths.shape}")
 
 
+def propose_native_rule_market(
+    batch: Batch,
+    intent: StrategicIntent,
+    plan: MarketPlanBatch,
+    *,
+    starting_money: int,
+    shed_capacity: int,
+    episode_steps: int,
+    turns_per_day: int,
+) -> None:
+    """Append the current rule-based market policy through Rust.
+
+    This is a fast backend for the hand-written rule policy. A learned market
+    policy can still implement :class:`MarketRule` directly without using it.
+    """
+    if _propose_rule_market is None:
+        raise RuntimeError(
+            "native rule market requires the bertani._rust extension"
+        )
+    views = batch.observation_views
+    _propose_rule_market(
+        views.global_features,
+        views.farms,
+        views.tiles,
+        views.units,
+        views.private,
+        batch.active_units,
+        np.ascontiguousarray(intent.target_hands, dtype=np.int64),
+        np.ascontiguousarray(intent.wheat_reserve, dtype=np.int64),
+        np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
+        np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
+        plan.actions,
+        plan.lengths,
+        plan.overflow,
+        starting_money,
+        shed_capacity,
+        episode_steps,
+        turns_per_day,
+    )
+
+
 class MarketRule(Protocol):
     """Extension point for rules that append orders or reserve resources."""
 
@@ -125,4 +173,4 @@ class MarketRule(Protocol):
         """Extend an ordered plan without constructing tensor rows directly."""
 
 
-__all__ = ["MarketPlanBatch", "MarketRule"]
+__all__ = ["MarketPlanBatch", "MarketRule", "propose_native_rule_market"]
