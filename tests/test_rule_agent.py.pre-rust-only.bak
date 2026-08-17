@@ -245,10 +245,7 @@ def test_agent_expands_and_keeps_twelve_animals_alive() -> None:
     assert farm["unlocked_quadrants"][:3] == [0, 1, 2]
     center_access = ((4, 4), (5, 4), (4, 5), (5, 5))
     assert second_quadrant_unlock_step is not None
-    # The accepted fast route checkpoint unlocks the second quadrant at
-    # step 169 on seed 100; keep a tight regression bound without pinning
-    # the test to the older pre-optimization route timing.
-    assert second_quadrant_unlock_step <= 7 * 24 + 1
+    assert second_quadrant_unlock_step <= 7 * 24 - 1
     assert day_seven_animals == (4, 2)
     assert day_eight_strawberries >= 10
     assert len(day_eight_new_strawberry_positions) >= 4

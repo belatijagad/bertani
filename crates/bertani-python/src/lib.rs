@@ -2,7 +2,6 @@
 
 mod action;
 mod encoding;
-mod scheduler;
 mod route_scheduler;
 mod snapshot;
 mod vec_env;
@@ -13,9 +12,6 @@ use pyo3::prelude::*;
 mod _rust {
     #[pymodule_export]
     use super::vec_env::NativeVecEnv;
-
-    #[pymodule_export]
-    use super::scheduler::schedule_tasks;
 
     #[pymodule_export]
     use super::route_scheduler::schedule_routes;

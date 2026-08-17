@@ -160,11 +160,9 @@ class VectorRulePolicy:
         task_rules: tuple[TaskRule, ...] | None = None,
         market_rules: tuple[MarketRule, ...] | None = None,
         workforce_planner: WorkforcePlanner | None = None,
-        scheduler_mode: str = "route",
         profile: bool = False,
     ) -> None:
         self.config = config or RuleConfig()
-        self.scheduler_mode = scheduler_mode
         self.profile = profile
         self.profile_ns: dict[str, int] = {
             "opening": 0,
@@ -323,7 +321,6 @@ class VectorRulePolicy:
                 shed_capacity=self.config.shed_capacity,
                 episode_steps=self.config.episode_steps,
                 turns_per_day=self.config.turns_per_day,
-                scheduler_mode=self.scheduler_mode,
             )
             self._task_executor = TaskExecutor(board_size)
         return self.last_tasks

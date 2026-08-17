@@ -90,7 +90,6 @@ def run_native_batch(
     seeds: list[int],
     baseline: str,
     weed_spawn_chance: float,
-    scheduler: str = "route",
     profile: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Run one independent seed chunk and return rewards + diagnostics."""
@@ -101,7 +100,7 @@ def run_native_batch(
         weed_spawn_chance=weed_spawn_chance,
     )
     batch = environment.reset(paired_seeds)
-    rule = build_policy(scheduler_mode=scheduler, profile=profile)
+    rule = build_policy(profile=profile)
     v16 = NativeV16Policy(
         load_v16_actions(Path(baseline)),
         max_orders=environment.max_orders,
@@ -211,15 +210,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--scheduler",
-        choices=("route", "route-rust", "native"),
-        default="route",
-        help=(
-            "task scheduler: route-aware Python planner, equivalent Rust "
-            "route planner, or existing Rust priority-greedy fast path"
-        ),
-    )
-    parser.add_argument(
         "--profile",
         action="store_true",
         help="print coarse policy/environment timing diagnostics",
@@ -246,7 +236,6 @@ def main() -> None:
                 chunks[0],
                 str(args.baseline),
                 args.weed_spawn_chance,
-                args.scheduler,
                 args.profile,
             )
         ]
@@ -258,7 +247,6 @@ def main() -> None:
                     chunk,
                     str(args.baseline),
                     args.weed_spawn_chance,
-                    args.scheduler,
                     args.profile,
                 )
                 for chunk in chunks
@@ -277,8 +265,7 @@ def main() -> None:
     print(
         f"{summary['wins']}W/{summary['ties']}T/{summary['losses']}L; "
         f"mean margin={summary['mean_game_margin']:+.1f}; "
-        f"worst={summary['worst_game_margin']:+.0f}; "
-        f"scheduler={args.scheduler}"
+        f"worst={summary['worst_game_margin']:+.0f}"
     )
     if args.profile:
         total_rule_ns = sum(d["rule_ns"] for d in diagnostics)

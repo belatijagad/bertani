@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import bertani.tasks as task_module
 
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
@@ -184,10 +185,7 @@ def test_scheduler_prefers_nearby_work_within_an_urgency_band() -> None:
     assignments = scheduler.assign(batch, tasks)
     assert assignments.task_index[0, 0, 0] == 3 * env.board_size + 4
 
-    # On a fresh solve, a genuinely more urgent band wins regardless of
-    # travel distance. Reusing the same scheduler here would intentionally
-    # exercise the rolling route cache rather than the full-solve objective.
-    scheduler = TaskScheduler(env.board_size)
+    # A genuinely more urgent band still wins regardless of travel distance.
     tasks.clear()
     tasks.propose_tiles(TaskKind.CARE, nearby, 100.0)
     tasks.propose_tiles(TaskKind.FEED, remote, 120.0)
@@ -195,7 +193,13 @@ def test_scheduler_prefers_nearby_work_within_an_urgency_band() -> None:
     assert assignments.task_index[0, 0, 0] == 0
 
 
-def test_scheduler_persists_a_job_until_a_higher_urgency_band_interrupts() -> None:
+@pytest.mark.parametrize("use_native", (True, False))
+def test_scheduler_persists_a_job_until_a_higher_urgency_band_interrupts(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
     env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
     batch = env.reset()
     tasks = TaskBatch.allocate(1, 2, env.board_size)
@@ -225,18 +229,28 @@ def test_scheduler_persists_a_job_until_a_higher_urgency_band_interrupts() -> No
     assignments = scheduler.assign(batch, tasks)
     assert assignments.task_index[0, 0, 0] == second_slot
 
-    # A genuinely new exclusive emergency is a material state change. It is
-    # outside the cached route, so the scheduler must replan and the higher
-    # urgency band must win immediately.
-    emergency = np.zeros_like(first)
-    emergency[0, 0, 0, 0] = True
-    tasks.propose_tiles(TaskKind.FEED, emergency, 120.0)
+    # Re-establish the first job before checking emergency interruption.
     batch.observation_views.global_features[..., 0] = 25 / 719
+    batch.observation_views.units[0, 0, 0, 0, 3] = 4 / 9
     assignments = scheduler.assign(batch, tasks)
-    assert assignments.task_index[0, 0, 0] == 0
+    assert assignments.task_index[0, 0, 0] == first_slot
+
+    # Urgency bands are hard boundaries: persistence never blocks an emergency.
+    tasks.clear()
+    tasks.propose_tiles(TaskKind.CARE, first, 109.0)
+    tasks.propose_tiles(TaskKind.FEED, second, 110.0)
+    batch.observation_views.global_features[..., 0] = 26 / 719
+    assignments = scheduler.assign(batch, tasks)
+    assert assignments.task_index[0, 0, 0] == second_slot
 
 
-def test_scheduler_keeps_a_field_contract_within_the_top_urgency_band() -> None:
+@pytest.mark.parametrize("use_native", (True, False))
+def test_scheduler_keeps_a_field_contract_within_the_top_urgency_band(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
     env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
     batch = env.reset()
     tasks = TaskBatch.allocate(1, 2, env.board_size)
@@ -332,7 +346,13 @@ def test_workforce_zones_follow_quadrant_demand_without_intraday_thrashing() -> 
     assert np.count_nonzero(third.zone[0, 0, 1:5] == WorkZone.SW) == 4
 
 
-def test_capacity_reservation_keeps_a_planting_lane_below_harvest() -> None:
+@pytest.mark.parametrize("use_native", (True, False))
+def test_capacity_reservation_keeps_a_planting_lane_below_harvest(
+    monkeypatch: pytest.MonkeyPatch,
+    use_native: bool,
+) -> None:
+    if not use_native:
+        monkeypatch.setattr(task_module, "_native_schedule_tasks", None)
     env = VecEnv(1, seed=10, weed_spawn_chance=0.0)
     batch = env.reset()
     batch.active_units[0, 0, :4] = True
@@ -340,7 +360,7 @@ def test_capacity_reservation_keeps_a_planting_lane_below_harvest() -> None:
     harvest = np.zeros((1, 2, env.board_size, env.board_size), dtype=np.bool_)
     plant = np.zeros_like(harvest)
     harvest[0, 0, 0, :4] = True
-    plant[0, 0, 4, 4] = True
+    plant[0, 0, 1, 0] = True
     tasks.propose_tiles(TaskKind.HARVEST, harvest, 110.0)
     tasks.propose_tiles(TaskKind.PLANT, plant, 105.0)
     reserved = np.zeros((1, 2, max(TaskKind) + 1), dtype=np.int16)

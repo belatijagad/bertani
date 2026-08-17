@@ -10,14 +10,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 try:
-    from ._rust import schedule_tasks as _native_schedule_tasks
+    from ._rust import schedule_routes as _schedule_routes
 except (ImportError, ModuleNotFoundError):
-    _native_schedule_tasks = None
-
-try:
-    from ._rust import schedule_routes as _native_schedule_routes
-except (ImportError, ModuleNotFoundError):
-    _native_schedule_routes = None
+    _schedule_routes = None
 
 from .vec_env import Batch, Item, UnitOp
 
@@ -281,40 +276,16 @@ class WorkforcePlanner(Protocol):
     ) -> WorkforcePlan:
         """Return per-unit preferences for the current scheduling turn."""
 
-
-@dataclass(slots=True)
-class _RouteEvalCache:
-    """Precomputed route state for O(1) insertion scoring.
-
-    ``prev_x/y`` and ``elapsed_before`` describe the state immediately before
-    each insertion position. ``suffix_new_misses[position, delta]`` stores how
-    many currently-on-time tasks at/after ``position`` become late if insertion
-    shifts that suffix by ``delta`` turns.
-    """
-
-    prev_x: NDArray[np.int16]
-    prev_y: NDArray[np.int16]
-    elapsed_before: NDArray[np.int16]
-    suffix_new_misses: NDArray[np.int16]
-
-
 class TaskScheduler:
-    """Fast route-aware rolling-horizon assignment for farm tasks.
+    """Route-aware rolling-horizon task assignment backed by Rust.
 
-    This is behavior-compatible with the V2 scheduler's routing objective, but
-    removes two major hot-path costs:
+    Python owns the route cache, non-exclusive logistics, underfoot overrides,
+    assignment scores, and replan lifecycle. The expensive exclusive-task route
+    construction has a single implementation in ``bertani._rust.schedule_routes``.
 
-    1. Task ids are mapped to eligibility columns once per seat instead of
-       repeatedly calling ``np.flatnonzero`` inside nested worker/task loops.
-    2. A hypothetical insertion recomputes only the changed worker route.
-       Metrics for every unchanged route are cached.
-
-    The planning objective remains lexicographic:
+    The route objective is lexicographic:
 
         missed deadlines -> makespan -> total route length -> soft preference
-
-    The scheduler still executes only the first task of each planned route and
-    replans on the next observation.
     """
 
     def __init__(
@@ -324,22 +295,12 @@ class TaskScheduler:
         continuity_bonus: float = 1.0,
         episode_steps: int = 720,
         turns_per_day: int = 24,
-        scheduler_mode: str = "route",
     ) -> None:
-        if scheduler_mode not in {"route", "route-rust", "native"}:
-            raise ValueError(
-                "scheduler_mode must be 'route', 'route-rust', or 'native'"
-            )
-        if scheduler_mode == "native" and _native_schedule_tasks is None:
+        if _schedule_routes is None:
             raise RuntimeError(
-                "native scheduler requested but bertani._rust.schedule_tasks is unavailable"
+                "bertani._rust.schedule_routes is unavailable; rebuild the "
+                "extension with `uv run maturin develop --release`"
             )
-        if scheduler_mode == "route-rust" and _native_schedule_routes is None:
-            raise RuntimeError(
-                "route-rust scheduler requested but bertani._rust.schedule_routes "
-                "is unavailable; rebuild the extension with `uv run maturin develop --release`"
-            )
-        self.scheduler_mode = scheduler_mode
         self.board_size = board_size
         self.shed_capacity = shed_capacity
         self.continuity_bonus = continuity_bonus
@@ -349,15 +310,15 @@ class TaskScheduler:
         self._assignments: TaskAssignments | None = None
         self._previous_task: NDArray[np.int64] | None = None
 
-        # Persistent per-seat route plans. Routes contain stable TaskBatch slot
-        # ids, not primitive movement actions. Tile slots remain stable as a
-        # tile transitions FEED -> CARE -> HARVEST, HARVEST -> PLANT, etc.
+        # Routes contain stable TaskBatch slot ids rather than primitive
+        # movement actions. Stable tile slots let FEED -> CARE -> HARVEST and
+        # HARVEST -> PLANT workflows reuse a day plan when it remains valid.
         self._route_cache: dict[tuple[int, int], dict[int, list[int]]] = {}
         self._route_cache_day: dict[tuple[int, int], int] = {}
         self._route_cache_units: dict[tuple[int, int], tuple[int, ...]] = {}
         self._force_replan: set[tuple[int, int]] = set()
 
-        # Lightweight profiling counters.
+        # Lightweight diagnostics used by the native pit harness.
         self.full_solves = 0
         self.cache_hits = 0
         self.cache_miss_reasons: dict[str, int] = {
@@ -374,16 +335,6 @@ class TaskScheduler:
             "fetch_item": 0,
             "local_override": 0,
         }
-
-        # Reusable compact buffers for the opt-in native greedy scheduler.
-        # Their unit axis is only the live prefix, never VecEnv's padded 231.
-        self._native_shape: tuple[int, int, int] | None = None
-        self._native_active: NDArray[np.bool_] | None = None
-        self._native_role: NDArray[np.int16] | None = None
-        self._native_zone: NDArray[np.int16] | None = None
-        self._native_previous: NDArray[np.int64] | None = None
-        self._native_task_index: NDArray[np.int64] | None = None
-        self._native_scores: NDArray[np.float32] | None = None
 
     def assign(
         self,
@@ -436,9 +387,7 @@ class TaskScheduler:
             controlled_seats = np.ones((n, players), dtype=np.bool_)
         else:
             if seat_mask.shape != (n, players):
-                raise ValueError(
-                    f"seat mask must have shape {(n, players)}"
-                )
+                raise ValueError(f"seat mask must have shape {(n, players)}")
             controlled_seats = np.asarray(seat_mask, dtype=np.bool_)
 
         if workforce is None:
@@ -481,27 +430,6 @@ class TaskScheduler:
             + (tasks.target_x >= half).astype(np.int16)
         )
 
-        if self.scheduler_mode == "native":
-            self._assign_native_greedy(
-                batch=batch,
-                tasks=tasks,
-                assignments=assignments,
-                active_limit=active_limit,
-                unit_x=unit_x,
-                unit_y=unit_y,
-                inventories=inventories,
-                unit_role=unit_role,
-                unit_zone=unit_zone,
-                task_zone=task_zone,
-                role_bonus=role_bonus,
-                zone_bonus=zone_bonus,
-                reserved_by_kind=reserved_by_kind,
-                controlled_seats=controlled_seats,
-            )
-            self._previous_task[...] = assignments.task_index
-            self._previous_task[~batch.active_units] = -1
-            return assignments
-
         for environment, player in np.argwhere(controlled_seats):
             self._assign_seat(
                 environment=int(environment),
@@ -526,119 +454,7 @@ class TaskScheduler:
         self._previous_task[~batch.active_units] = -1
         return assignments
 
-    def _assign_native_greedy(
-        self,
-        *,
-        batch: Batch,
-        tasks: TaskBatch,
-        assignments: TaskAssignments,
-        active_limit: int,
-        unit_x: NDArray[np.int16],
-        unit_y: NDArray[np.int16],
-        inventories: NDArray[np.int64],
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-        reserved_by_kind: NDArray[np.int16],
-        controlled_seats: NDArray[np.bool_],
-    ) -> None:
-        """Run the existing Rust priority-tiered greedy scheduler.
-
-        This is an opt-in experiment for rollout throughput.  It is *not*
-        behavior-equivalent to the route-aware Python scheduler: it chooses one
-        task per worker greedily inside urgency bands rather than constructing
-        complete routes.  The pit harness exposes it behind ``--scheduler
-        native`` so speed and strength can be measured independently.
-
-        Only the live unit prefix is copied into contiguous arrays before
-        crossing the PyO3 boundary.  Uncontrolled seats are marked inactive so
-        the native scheduler does no useful work for outputs the pit will throw
-        away.
-        """
-
-        assert _native_schedule_tasks is not None
-        if active_limit <= 0:
-            return
-        assert self._previous_task is not None
-
-        # Slicing the last axis of a [N, P, max_units] tensor leaves the parent
-        # row stride in place, so explicitly compact the few live slots.  With
-        # the current strategy this is normally ~5-14 units instead of 231.
-        native_shape = (*batch.active_units.shape[:2], active_limit)
-        if self._native_shape != native_shape:
-            self._native_active = np.empty(native_shape, dtype=np.bool_)
-            self._native_role = np.empty(native_shape, dtype=np.int16)
-            self._native_zone = np.empty(native_shape, dtype=np.int16)
-            self._native_previous = np.empty(native_shape, dtype=np.int64)
-            self._native_task_index = np.empty(native_shape, dtype=np.int64)
-            self._native_scores = np.empty(native_shape, dtype=np.float32)
-            self._native_shape = native_shape
-
-        assert self._native_active is not None
-        assert self._native_role is not None
-        assert self._native_zone is not None
-        assert self._native_previous is not None
-        assert self._native_task_index is not None
-        assert self._native_scores is not None
-
-        native_active = self._native_active
-        native_role = self._native_role
-        native_zone = self._native_zone
-        native_previous = self._native_previous
-        native_task_index = self._native_task_index
-        native_scores = self._native_scores
-
-        np.logical_and(
-            batch.active_units[..., :active_limit],
-            controlled_seats[..., None],
-            out=native_active,
-        )
-        np.copyto(native_role, unit_role[..., :active_limit])
-        np.copyto(native_zone, unit_zone[..., :active_limit])
-        np.copyto(native_previous, self._previous_task[..., :active_limit])
-
-        _native_schedule_tasks(
-            np.ascontiguousarray(unit_x, dtype=np.int16),
-            np.ascontiguousarray(unit_y, dtype=np.int16),
-            np.ascontiguousarray(inventories, dtype=np.int64),
-            np.ascontiguousarray(tasks.priority, dtype=np.float32),
-            native_active,
-            np.ascontiguousarray(tasks.active, dtype=np.bool_),
-            np.ascontiguousarray(tasks.exclusive, dtype=np.bool_),
-            np.ascontiguousarray(tasks.target_x, dtype=np.int16),
-            np.ascontiguousarray(tasks.target_y, dtype=np.int16),
-            np.ascontiguousarray(tasks.required_item, dtype=np.int16),
-            np.ascontiguousarray(tasks.required_count, dtype=np.int64),
-            np.ascontiguousarray(tasks.kind, dtype=np.int16),
-            np.ascontiguousarray(tasks.work_role, dtype=np.int16),
-            native_role,
-            native_zone,
-            np.ascontiguousarray(task_zone, dtype=np.int16),
-            float(role_bonus),
-            float(zone_bonus),
-            np.ascontiguousarray(reserved_by_kind, dtype=np.int16),
-            native_previous,
-            float(self.continuity_bonus),
-            int(self.board_size),
-            native_task_index,
-            native_scores,
-        )
-
-        assignments.task_index[..., :active_limit] = native_task_index
-        assignments.score[..., :active_limit] = native_scores
-
-        # Native mode intentionally has no route cache.  Keep the public
-        # counters meaningful so the pit output immediately reveals which path
-        # ran.
-        self.full_solves += int(np.count_nonzero(controlled_seats))
-        self._route_cache.clear()
-        self._route_cache_day.clear()
-        self._route_cache_units.clear()
-        self._force_replan.clear()
-
-    def _solve_routes_rust(
+    def _solve_routes(
         self,
         *,
         environment: int,
@@ -656,16 +472,9 @@ class TaskScheduler:
         reserved_by_kind: NDArray[np.int16],
         hour: int,
     ) -> list[list[int]]:
-        """Construct the exact route-aware plan in Rust.
+        """Construct the exclusive-task route plan in the native solver."""
 
-        Only the expensive exclusive-task route construction crosses this
-        boundary. Cache validation, non-exclusive logistics, underfoot
-        overrides, assignment scoring, and replan semantics stay in Python so
-        ``route-rust`` can be compared directly with the existing ``route``
-        backend.
-        """
-
-        assert _native_schedule_routes is not None
+        assert _schedule_routes is not None
         assert self._previous_task is not None
 
         seat_inventory = np.ascontiguousarray(
@@ -685,7 +494,7 @@ class TaskScheduler:
             dtype=np.int64,
         )
 
-        raw_routes = _native_schedule_routes(
+        raw_routes = _schedule_routes(
             np.ascontiguousarray(starts_x, dtype=np.int16),
             np.ascontiguousarray(starts_y, dtype=np.int16),
             seat_inventory,
@@ -778,7 +587,6 @@ class TaskScheduler:
             return
 
         self.full_solves += 1
-        worker_count = int(active_units.size)
         starts_x = unit_x[environment, player, active_units].astype(
             np.int16, copy=False
         )
@@ -786,22 +594,14 @@ class TaskScheduler:
             np.int16, copy=False
         )
 
-        # O(1) task-id -> active-task-column lookup. The old implementation did
-        # np.flatnonzero(active_tasks == task) in several nested loops.
+        # O(1) task-id -> active-task-column lookup for non-exclusive logistics.
         task_column = np.full(tasks.capacity, -1, dtype=np.int16)
         task_column[active_tasks] = np.arange(
             active_tasks.size,
             dtype=np.int16,
         )
 
-        routes: list[list[int]] = [[] for _ in range(worker_count)]
-        prefix_length = np.zeros(worker_count, dtype=np.int16)
-        # Rebuilt only for the worker whose route changed. The old scheduler
-        # rescanned the complete route for every (task, worker, position)
-        # candidate, which dominated full-solve CPU time.
-        route_eval_cache: list[_RouteEvalCache | None] = [None] * worker_count
-
-        eligible = self._eligibility_matrix_fast(
+        eligible = self._eligibility_matrix(
             environment,
             player,
             active_units,
@@ -818,17 +618,9 @@ class TaskScheduler:
         exclusive_tasks = active_tasks[exclusive_mask]
         nonexclusive_tasks = active_tasks[~exclusive_mask]
 
-        # Cached metrics for the current constructed routes. These are updated
-        # only after accepting an insertion.
-        route_missed = np.zeros(worker_count, dtype=np.int16)
-        route_length = np.zeros(worker_count, dtype=np.int16)
-        route_preference = np.zeros(worker_count, dtype=np.float32)
-        total_missed = 0
-        total_length = 0
-        total_preference = 0.0
-
-        if exclusive_tasks.size and self.scheduler_mode == "route-rust":
-            routes = self._solve_routes_rust(
+        routes: list[list[int]] = [[] for _ in range(active_units.size)]
+        if exclusive_tasks.size:
+            routes = self._solve_routes(
                 environment=environment,
                 player=player,
                 active_units=active_units,
@@ -844,159 +636,6 @@ class TaskScheduler:
                 reserved_by_kind=reserved_by_kind,
                 hour=hour,
             )
-        elif exclusive_tasks.size:
-            priorities = tasks.priority[
-                environment,
-                player,
-                exclusive_tasks,
-            ]
-            urgency = np.floor(priorities / 10.0)
-            urgency_bands = np.unique(urgency)[::-1]
-
-            for urgency_band in urgency_bands:
-                tier_mask = urgency == urgency_band
-                tier_tasks = exclusive_tasks[tier_mask]
-                if tier_tasks.size == 0:
-                    continue
-
-                lower_tasks = exclusive_tasks[urgency < urgency_band]
-                future_reserve = self._future_reserve(
-                    environment,
-                    player,
-                    float(urgency_band),
-                    lower_tasks,
-                    tasks,
-                    reserved_by_kind,
-                )
-                max_workers = max(
-                    1,
-                    worker_count - future_reserve,
-                )
-
-                candidate_locals = self._candidate_workers_for_tier_fast(
-                    environment=environment,
-                    player=player,
-                    tier_tasks=tier_tasks,
-                    starts_x=starts_x,
-                    starts_y=starts_y,
-                    routes=routes,
-                    eligible=eligible,
-                    task_column=task_column,
-                    tasks=tasks,
-                    max_workers=max_workers,
-                )
-                if not candidate_locals:
-                    continue
-
-                ordered_tasks = sorted(
-                    (int(task) for task in tier_tasks),
-                    key=lambda task: (
-                        self._deadline_key(
-                            int(tasks.deadline[environment, player, task]),
-                            hour,
-                        ),
-                        -float(tasks.priority[environment, player, task]),
-                        task,
-                    ),
-                )
-
-                for task in ordered_tasks:
-                    # Current top-two route lengths let us obtain the makespan
-                    # after changing one route in O(1).
-                    max1, max2, max1_count = self._top_two_lengths(route_length)
-
-                    best: tuple[
-                        tuple[int, int, int, float],
-                        int,
-                        int,
-                        tuple[int, int, float],
-                    ] | None = None
-
-                    task_col = int(task_column[task])
-
-                    for local in candidate_locals:
-                        if not eligible[local, task_col]:
-                            continue
-
-                        worker = int(active_units[local])
-                        first_position = int(prefix_length[local])
-                        route = routes[local]
-
-                        old_missed = int(route_missed[local])
-                        old_length = int(route_length[local])
-                        old_preference = float(route_preference[local])
-
-                        if old_length == max1 and max1_count == 1:
-                            other_max = max2
-                        else:
-                            other_max = max1
-
-                        route_cache = route_eval_cache[local]
-                        if route_cache is None:
-                            route_cache = self._build_route_eval_cache(
-                                environment=environment,
-                                player=player,
-                                start_x=int(starts_x[local]),
-                                start_y=int(starts_y[local]),
-                                route=route,
-                                tasks=tasks,
-                                hour=hour,
-                            )
-                            route_eval_cache[local] = route_cache
-
-                        local_best = self._best_insertion_for_worker_fast(
-                            environment=environment,
-                            player=player,
-                            worker=worker,
-                            local=local,
-                            route=route,
-                            route_cache=route_cache,
-                            first_position=first_position,
-                            old_missed=old_missed,
-                            old_length=old_length,
-                            old_preference=old_preference,
-                            insert_task=task,
-                            other_max=other_max,
-                            total_missed=total_missed,
-                            total_length=total_length,
-                            total_preference=total_preference,
-                            tasks=tasks,
-                            unit_role=unit_role,
-                            unit_zone=unit_zone,
-                            task_zone=task_zone,
-                            role_bonus=role_bonus,
-                            zone_bonus=zone_bonus,
-                            hour=hour,
-                        )
-                        if local_best is not None and (
-                            best is None or local_best[:3] < best[:3]
-                        ):
-                            best = local_best
-
-                    if best is None:
-                        continue
-
-                    _, local, position, new_metrics = best
-                    old_missed = int(route_missed[local])
-                    old_length = int(route_length[local])
-                    old_preference = float(route_preference[local])
-
-                    routes[local].insert(position, task)
-                    route_eval_cache[local] = None
-
-                    new_missed, new_length, new_preference = new_metrics
-                    route_missed[local] = new_missed
-                    route_length[local] = new_length
-                    route_preference[local] = new_preference
-
-                    total_missed += new_missed - old_missed
-                    total_length += new_length - old_length
-                    total_preference += new_preference - old_preference
-
-                # Lower urgency bands may not jump ahead of tasks already placed
-                # by higher urgency bands.
-                for local in range(worker_count):
-                    prefix_length[local] = len(routes[local])
 
         claimed: set[int] = set()
 
@@ -1027,8 +666,7 @@ class TaskScheduler:
             )
             claimed.add(task)
 
-        # Non-exclusive logistics tasks keep the V2 semantics, but avoid
-        # allocating a temporary choices list.
+        # Non-exclusive logistics tasks keep the existing semantics.
         if nonexclusive_tasks.size:
             for local, worker_value in enumerate(active_units):
                 worker = int(worker_value)
@@ -1095,8 +733,8 @@ class TaskScheduler:
             int(worker) for worker in active_units
         )
 
-        # FETCH_ITEM is intentionally a one-turn logistics task in V2. Once a
-        # pickup executes, worker eligibility changes, so solve again next turn.
+        # FETCH_ITEM is a one-turn logistics task. Once a pickup executes,
+        # worker eligibility changes, so solve again next turn.
         assigned_indices = assignments.task_index[
             environment,
             player,
@@ -1113,9 +751,8 @@ class TaskScheduler:
                 self._force_replan.add(key)
                 self._count_force_replan("fetch_item")
 
-        # The underfoot override may intentionally deviate from the route's
-        # first planned task. Replan next turn instead of mutating the cached
-        # route in a potentially inconsistent way.
+        # An underfoot override may intentionally deviate from the route's
+        # first planned task. Replan next turn rather than mutating the route.
         for local, worker_value in enumerate(active_units):
             worker = int(worker_value)
             route = routes[local]
@@ -1132,916 +769,394 @@ class TaskScheduler:
                 self._count_force_replan("local_override")
                 break
 
+
     def _serve_cached_routes(
-        self,
-        *,
-        environment: int,
-        player: int,
-        day: int,
-        active_units: NDArray[np.int64],
-        active_tasks: NDArray[np.int64],
-        batch: Batch,
-        tasks: TaskBatch,
-        assignments: TaskAssignments,
-        unit_x: NDArray[np.int16],
-        unit_y: NDArray[np.int16],
-        inventories: NDArray[np.int64],
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-    ) -> bool:
-        """Serve a still-valid day plan without running route construction.
+            self,
+            *,
+            environment: int,
+            player: int,
+            day: int,
+            active_units: NDArray[np.int64],
+            active_tasks: NDArray[np.int64],
+            batch: Batch,
+            tasks: TaskBatch,
+            assignments: TaskAssignments,
+            unit_x: NDArray[np.int16],
+            unit_y: NDArray[np.int16],
+            inventories: NDArray[np.int64],
+            unit_role: NDArray[np.int16],
+            unit_zone: NDArray[np.int16],
+            task_zone: NDArray[np.int16],
+            role_bonus: float,
+            zone_bonus: float,
+        ) -> bool:
+            """Serve a still-valid day plan without running route construction.
 
-        A full replan is required only when:
-        - the day changed,
-        - the active worker set changed (hire/end-of-day),
-        - a previous FETCH_ITEM changed eligibility,
-        - a genuinely new exclusive task appears outside cached routes, or
-        - a cached route's next task is no longer executable by its worker.
+            A full replan is required only when:
+            - the day changed,
+            - the active worker set changed (hire/end-of-day),
+            - a previous FETCH_ITEM changed eligibility,
+            - a genuinely new exclusive task appears outside cached routes, or
+            - a cached route's next task is no longer executable by its worker.
 
-        Completed/inactive tasks are simply removed from cached routes.
-        """
+            Completed/inactive tasks are simply removed from cached routes.
+            """
 
-        key = (environment, player)
-        routes = self._route_cache.get(key)
-        if routes is None:
-            self._count_cache_miss("no_route")
-            return False
-        if self._route_cache_day.get(key) != day:
-            self._count_cache_miss("day_changed")
-            return False
-
-        active_unit_tuple = tuple(int(worker) for worker in active_units)
-        if self._route_cache_units.get(key) != active_unit_tuple:
-            self._count_cache_miss("unit_set_changed")
-            return False
-
-        if key in self._force_replan:
-            self._force_replan.discard(key)
-            self._count_cache_miss("forced")
-            return False
-
-        active_mask = tasks.active[environment, player]
-
-        # Drop jobs that another worker already completed or that disappeared.
-        # If the same tile changes from FEED to CARE/HARVEST, its slot remains
-        # active and therefore stays at the same place in the cached route.
-        planned: set[int] = set()
-        for worker in active_unit_tuple:
-            route = routes.get(worker)
-            if route is None:
-                self._count_cache_miss("missing_worker_route")
+            key = (environment, player)
+            routes = self._route_cache.get(key)
+            if routes is None:
+                self._count_cache_miss("no_route")
                 return False
-            if route:
-                route[:] = [
-                    task for task in route
-                    if bool(active_mask[task])
-                ]
-                planned.update(route)
-
-        # A new exclusive task that was not visible during the last solve
-        # indicates a material state change: land/seed changes, a newly created
-        # production job, etc. Recompute to place it globally.
-        exclusive_active = active_tasks[
-            tasks.exclusive[
-                environment,
-                player,
-                active_tasks,
-            ]
-        ]
-        for task_value in exclusive_active:
-            if int(task_value) not in planned:
-                self._count_cache_miss("new_exclusive")
+            if self._route_cache_day.get(key) != day:
+                self._count_cache_miss("day_changed")
                 return False
 
-        claimed: set[int] = set()
-
-        for worker_value in active_units:
-            worker = int(worker_value)
-            route = routes[worker]
-            if not route:
-                continue
-
-            task = int(route[0])
-            required = int(
-                tasks.required_item[
-                    environment,
-                    player,
-                    task,
-                ]
-            )
-            if (
-                required >= 0
-                and inventories[
-                    environment,
-                    player,
-                    worker,
-                    required,
-                ]
-                < tasks.required_count[
-                    environment,
-                    player,
-                    task,
-                ]
-            ):
-                self._count_cache_miss("required_item")
+            active_unit_tuple = tuple(int(worker) for worker in active_units)
+            if self._route_cache_units.get(key) != active_unit_tuple:
+                self._count_cache_miss("unit_set_changed")
                 return False
 
-            # Deposit tasks require the worker to still be carrying something.
-            if (
-                int(
-                    tasks.kind[
-                        environment,
-                        player,
-                        task,
+            if key in self._force_replan:
+                self._force_replan.discard(key)
+                self._count_cache_miss("forced")
+                return False
+
+            active_mask = tasks.active[environment, player]
+
+            # Drop jobs that another worker already completed or that disappeared.
+            # If the same tile changes from FEED to CARE/HARVEST, its slot remains
+            # active and therefore stays at the same place in the cached route.
+            planned: set[int] = set()
+            for worker in active_unit_tuple:
+                route = routes.get(worker)
+                if route is None:
+                    self._count_cache_miss("missing_worker_route")
+                    return False
+                if route:
+                    route[:] = [
+                        task for task in route
+                        if bool(active_mask[task])
                     ]
-                )
-                == int(TaskKind.DEPOSIT_INVENTORY)
-                and inventories[
+                    planned.update(route)
+
+            # A new exclusive task that was not visible during the last solve
+            # indicates a material state change: land/seed changes, a newly created
+            # production job, etc. Recompute to place it globally.
+            exclusive_active = active_tasks[
+                tasks.exclusive[
                     environment,
                     player,
-                    worker,
-                ].sum()
-                <= 0
-            ):
-                self._count_cache_miss("empty_deposit")
-                return False
-
-            assignments.task_index[
-                environment,
-                player,
-                worker,
-            ] = task
-            assignments.score[
-                environment,
-                player,
-                worker,
-            ] = self._assignment_score(
-                environment,
-                player,
-                worker,
-                task,
-                unit_x,
-                unit_y,
-                tasks,
-                unit_role,
-                unit_zone,
-                task_zone,
-                role_bonus,
-                zone_bonus,
-            )
-            claimed.add(task)
-
-        # Preserve V2's cheap non-exclusive logistics behavior for otherwise
-        # idle workers. These are intentionally not persisted.
-        nonexclusive_tasks = active_tasks[
-            ~tasks.exclusive[
-                environment,
-                player,
-                active_tasks,
+                    active_tasks,
+                ]
             ]
-        ]
-        if nonexclusive_tasks.size:
+            for task_value in exclusive_active:
+                if int(task_value) not in planned:
+                    self._count_cache_miss("new_exclusive")
+                    return False
+
+            claimed: set[int] = set()
+
             for worker_value in active_units:
                 worker = int(worker_value)
-                if assignments.task_index[
+                route = routes[worker]
+                if not route:
+                    continue
+
+                task = int(route[0])
+                required = int(
+                    tasks.required_item[
+                        environment,
+                        player,
+                        task,
+                    ]
+                )
+                if (
+                    required >= 0
+                    and inventories[
+                        environment,
+                        player,
+                        worker,
+                        required,
+                    ]
+                    < tasks.required_count[
+                        environment,
+                        player,
+                        task,
+                    ]
+                ):
+                    self._count_cache_miss("required_item")
+                    return False
+
+                # Deposit tasks require the worker to still be carrying something.
+                if (
+                    int(
+                        tasks.kind[
+                            environment,
+                            player,
+                            task,
+                        ]
+                    )
+                    == int(TaskKind.DEPOSIT_INVENTORY)
+                    and inventories[
+                        environment,
+                        player,
+                        worker,
+                    ].sum()
+                    <= 0
+                ):
+                    self._count_cache_miss("empty_deposit")
+                    return False
+
+                assignments.task_index[
                     environment,
                     player,
                     worker,
-                ] >= 0:
-                    continue
+                ] = task
+                assignments.score[
+                    environment,
+                    player,
+                    worker,
+                ] = self._assignment_score(
+                    environment,
+                    player,
+                    worker,
+                    task,
+                    unit_x,
+                    unit_y,
+                    tasks,
+                    unit_role,
+                    unit_zone,
+                    task_zone,
+                    role_bonus,
+                    zone_bonus,
+                )
+                claimed.add(task)
 
-                best_choice: tuple[float, int] | None = None
-                for task_value in nonexclusive_tasks:
-                    task = int(task_value)
-
-                    required = int(
-                        tasks.required_item[
-                            environment,
-                            player,
-                            task,
-                        ]
-                    )
-                    if (
-                        required >= 0
-                        and inventories[
-                            environment,
-                            player,
-                            worker,
-                            required,
-                        ]
-                        < tasks.required_count[
-                            environment,
-                            player,
-                            task,
-                        ]
-                    ):
+            # Preserve V2's cheap non-exclusive logistics behavior for otherwise
+            # idle workers. These are intentionally not persisted.
+            nonexclusive_tasks = active_tasks[
+                ~tasks.exclusive[
+                    environment,
+                    player,
+                    active_tasks,
+                ]
+            ]
+            if nonexclusive_tasks.size:
+                for worker_value in active_units:
+                    worker = int(worker_value)
+                    if assignments.task_index[
+                        environment,
+                        player,
+                        worker,
+                    ] >= 0:
                         continue
 
-                    if (
-                        int(
-                            tasks.kind[
+                    best_choice: tuple[float, int] | None = None
+                    for task_value in nonexclusive_tasks:
+                        task = int(task_value)
+
+                        required = int(
+                            tasks.required_item[
                                 environment,
                                 player,
                                 task,
                             ]
                         )
-                        == int(TaskKind.DEPOSIT_INVENTORY)
-                        and inventories[
-                            environment,
-                            player,
-                            worker,
-                        ].sum()
-                        <= 0
-                    ):
-                        continue
-
-                    score = self._assignment_score(
-                        environment,
-                        player,
-                        worker,
-                        task,
-                        unit_x,
-                        unit_y,
-                        tasks,
-                        unit_role,
-                        unit_zone,
-                        task_zone,
-                        role_bonus,
-                        zone_bonus,
-                    )
-                    choice = (score, task)
-                    if best_choice is None or choice > best_choice:
-                        best_choice = choice
-
-                if best_choice is not None:
-                    score, task = best_choice
-                    assignments.task_index[
-                        environment,
-                        player,
-                        worker,
-                    ] = task
-                    assignments.score[
-                        environment,
-                        player,
-                        worker,
-                    ] = score
-                    if (
-                        int(
-                            tasks.kind[
+                        if (
+                            required >= 0
+                            and inventories[
+                                environment,
+                                player,
+                                worker,
+                                required,
+                            ]
+                            < tasks.required_count[
                                 environment,
                                 player,
                                 task,
                             ]
+                        ):
+                            continue
+
+                        if (
+                            int(
+                                tasks.kind[
+                                    environment,
+                                    player,
+                                    task,
+                                ]
+                            )
+                            == int(TaskKind.DEPOSIT_INVENTORY)
+                            and inventories[
+                                environment,
+                                player,
+                                worker,
+                            ].sum()
+                            <= 0
+                        ):
+                            continue
+
+                        score = self._assignment_score(
+                            environment,
+                            player,
+                            worker,
+                            task,
+                            unit_x,
+                            unit_y,
+                            tasks,
+                            unit_role,
+                            unit_zone,
+                            task_zone,
+                            role_bonus,
+                            zone_bonus,
                         )
-                        == int(TaskKind.FETCH_ITEM)
-                    ):
-                        self._force_replan.add(key)
-                        self._count_force_replan("fetch_item")
+                        choice = (score, task)
+                        if best_choice is None or choice > best_choice:
+                            best_choice = choice
 
-        before_local = assignments.task_index[
-            environment,
-            player,
-            active_units,
-        ].copy()
+                    if best_choice is not None:
+                        score, task = best_choice
+                        assignments.task_index[
+                            environment,
+                            player,
+                            worker,
+                        ] = task
+                        assignments.score[
+                            environment,
+                            player,
+                            worker,
+                        ] = score
+                        if (
+                            int(
+                                tasks.kind[
+                                    environment,
+                                    player,
+                                    task,
+                                ]
+                            )
+                            == int(TaskKind.FETCH_ITEM)
+                        ):
+                            self._force_replan.add(key)
+                            self._count_force_replan("fetch_item")
 
-        self._prefer_local_task(
-            environment,
-            player,
-            active_units,
-            claimed,
-            assignments,
-            tasks,
-            unit_x,
-            unit_y,
-            inventories,
-        )
+            before_local = assignments.task_index[
+                environment,
+                player,
+                active_units,
+            ].copy()
 
-        after_local = assignments.task_index[
-            environment,
-            player,
-            active_units,
-        ]
-        if np.any(before_local != after_local):
-            self._force_replan.add(key)
-            self._count_force_replan("local_override")
+            self._prefer_local_task(
+                environment,
+                player,
+                active_units,
+                claimed,
+                assignments,
+                tasks,
+                unit_x,
+                unit_y,
+                inventories,
+            )
 
-        return True
+            after_local = assignments.task_index[
+                environment,
+                player,
+                active_units,
+            ]
+            if np.any(before_local != after_local):
+                self._force_replan.add(key)
+                self._count_force_replan("local_override")
 
-    @staticmethod
-    def _top_two_lengths(
-        lengths: NDArray[np.int16],
-    ) -> tuple[int, int, int]:
-        """Return largest, second-largest, and multiplicity of largest."""
+            return True
 
-        max1 = 0
-        max2 = 0
-        count = 0
+    def _eligibility_matrix(
+            self,
+            environment: int,
+            player: int,
+            active_units: NDArray[np.int64],
+            active_tasks: NDArray[np.int64],
+            tasks: TaskBatch,
+            inventories: NDArray[np.int64],
+        ) -> NDArray[np.bool_]:
+            """Vectorized V2 eligibility calculation."""
 
-        for value_raw in lengths:
-            value = int(value_raw)
-            if value > max1:
-                max2 = max1
-                max1 = value
-                count = 1
-            elif value == max1:
-                count += 1
-            elif value > max2:
-                max2 = value
-
-        return max1, max2, count
-
-    def _eligibility_matrix_fast(
-        self,
-        environment: int,
-        player: int,
-        active_units: NDArray[np.int64],
-        active_tasks: NDArray[np.int64],
-        tasks: TaskBatch,
-        inventories: NDArray[np.int64],
-    ) -> NDArray[np.bool_]:
-        """Vectorized V2 eligibility calculation."""
-
-        required_item = tasks.required_item[
-            environment,
-            player,
-            active_tasks,
-        ].astype(np.int64, copy=False)
-
-        required_count = tasks.required_count[
-            environment,
-            player,
-            active_tasks,
-        ].astype(np.int64, copy=False)
-
-        safe_item = np.maximum(required_item, 0)
-
-        carried = inventories[
-            environment,
-            player,
-            active_units[:, None],
-            safe_item[None, :],
-        ]
-
-        eligible = (
-            (required_item[None, :] < 0)
-            | (carried >= required_count[None, :])
-        )
-
-        deposit_columns = (
-            tasks.kind[
+            required_item = tasks.required_item[
                 environment,
                 player,
                 active_tasks,
-            ]
-            == int(TaskKind.DEPOSIT_INVENTORY)
-        )
+            ].astype(np.int64, copy=False)
 
-        if np.any(deposit_columns):
-            carrying = (
-                inventories[
-                    environment,
-                    player,
-                    active_units,
-                ].sum(axis=-1)
-                > 0
-            )
-            eligible[:, deposit_columns] &= carrying[:, None]
-
-        return np.ascontiguousarray(eligible, dtype=np.bool_)
-
-    @staticmethod
-    def _deadline_key(deadline: int, hour: int) -> int:
-        if deadline < 0:
-            return 1_000_000
-        return max(0, deadline - hour)
-
-    @staticmethod
-    def _future_reserve(
-        environment: int,
-        player: int,
-        urgency_band: float,
-        lower_tasks: NDArray[np.int64],
-        tasks: TaskBatch,
-        reserved_by_kind: NDArray[np.int16],
-    ) -> int:
-        if urgency_band >= 12 or lower_tasks.size == 0:
-            return 0
-
-        future_reserve = 0
-        lower_kinds = tasks.kind[
-            environment,
-            player,
-            lower_tasks,
-        ]
-
-        for kind in range(reserved_by_kind.shape[-1]):
-            requested = int(
-                reserved_by_kind[
-                    environment,
-                    player,
-                    kind,
-                ]
-            )
-            if requested <= 0:
-                continue
-
-            available = int(
-                np.count_nonzero(lower_kinds == kind)
-            )
-            future_reserve += min(requested, available)
-
-        return future_reserve
-
-    def _candidate_workers_for_tier_fast(
-        self,
-        *,
-        environment: int,
-        player: int,
-        tier_tasks: NDArray[np.int64],
-        starts_x: NDArray[np.int16],
-        starts_y: NDArray[np.int16],
-        routes: list[list[int]],
-        eligible: NDArray[np.bool_],
-        task_column: NDArray[np.int16],
-        tasks: TaskBatch,
-        max_workers: int,
-    ) -> list[int]:
-        """Equivalent V2 worker ranking without repeated task-column searches."""
-
-        ranking: list[tuple[int, int, int]] = []
-
-        tier_x = tasks.target_x[
-            environment,
-            player,
-            tier_tasks,
-        ]
-        tier_y = tasks.target_y[
-            environment,
-            player,
-            tier_tasks,
-        ]
-
-        for local, route in enumerate(routes):
-            if route:
-                endpoint_task = route[-1]
-                start_x = int(
-                    tasks.target_x[
-                        environment,
-                        player,
-                        endpoint_task,
-                    ]
-                )
-                start_y = int(
-                    tasks.target_y[
-                        environment,
-                        player,
-                        endpoint_task,
-                    ]
-                )
-            else:
-                start_x = int(starts_x[local])
-                start_y = int(starts_y[local])
-
-            columns = task_column[tier_tasks].astype(np.int64, copy=False)
-            allowed = eligible[local, columns]
-            if not np.any(allowed):
-                continue
-
-            distances = (
-                np.abs(tier_x[allowed] - start_x)
-                + np.abs(tier_y[allowed] - start_y)
-            )
-            best_distance = int(distances.min())
-            ranking.append(
-                (
-                    best_distance,
-                    len(route),
-                    local,
-                )
-            )
-
-        ranking.sort()
-        return [
-            local
-            for _, _, local in ranking[:max_workers]
-        ]
-
-    def _build_route_eval_cache(
-        self,
-        *,
-        environment: int,
-        player: int,
-        start_x: int,
-        start_y: int,
-        route: list[int],
-        tasks: TaskBatch,
-        hour: int,
-    ) -> _RouteEvalCache:
-        """Build route statistics reused by every hypothetical insertion.
-
-        A 10x10 board bounds the extra distance introduced by inserting one
-        task between two route points to 37 turns.  We keep a tiny suffix table
-        over that bounded delta so deadline effects are an O(1) lookup.
-        """
-
-        route_len = len(route)
-        prev_x = np.empty(route_len + 1, dtype=np.int16)
-        prev_y = np.empty(route_len + 1, dtype=np.int16)
-        elapsed_before = np.empty(route_len + 1, dtype=np.int16)
-        completion = np.empty(route_len, dtype=np.int16)
-
-        x = start_x
-        y = start_y
-        elapsed = 0
-        for index, task in enumerate(route):
-            prev_x[index] = x
-            prev_y[index] = y
-            elapsed_before[index] = elapsed
-
-            tx = int(tasks.target_x[environment, player, task])
-            ty = int(tasks.target_y[environment, player, task])
-            elapsed += abs(x - tx) + abs(y - ty) + 1
-            completion[index] = elapsed
-            x = tx
-            y = ty
-
-        prev_x[route_len] = x
-        prev_y[route_len] = y
-        elapsed_before[route_len] = elapsed
-
-        # d(prev,new)+d(new,next)-d(prev,next)+1.  Manhattan distance on a
-        # BxB board is <= 2(B-1), so 4(B-1)+1 is an exact upper bound.
-        max_delta = 4 * (self.board_size - 1) + 1
-        suffix_hist = np.zeros(
-            (route_len + 1, max_delta),
-            dtype=np.int16,
-        )
-
-        for index in range(route_len - 1, -1, -1):
-            suffix_hist[index] = suffix_hist[index + 1]
-            task = route[index]
-            deadline = int(tasks.deadline[environment, player, task])
-            if deadline < 0:
-                continue
-
-            completion_hour = hour + int(completion[index]) - 1
-            slack = deadline - completion_hour
-            # Negative slack means this task is already late and therefore
-            # remains counted in old_missed.  Very large slack cannot be
-            # crossed by a single insertion on this board.
-            if 0 <= slack < max_delta:
-                suffix_hist[index, slack] += 1
-
-        suffix_new_misses = np.zeros(
-            (route_len + 1, max_delta + 1),
-            dtype=np.int16,
-        )
-        if max_delta:
-            # Column d is the number of suffix tasks with slack < d.
-            suffix_new_misses[:, 1:] = np.cumsum(
-                suffix_hist,
-                axis=1,
-                dtype=np.int16,
-            )
-
-        return _RouteEvalCache(
-            prev_x=prev_x,
-            prev_y=prev_y,
-            elapsed_before=elapsed_before,
-            suffix_new_misses=suffix_new_misses,
-        )
-
-    def _best_insertion_for_worker_fast(
-        self,
-        *,
-        environment: int,
-        player: int,
-        worker: int,
-        local: int,
-        route: list[int],
-        route_cache: _RouteEvalCache,
-        first_position: int,
-        old_missed: int,
-        old_length: int,
-        old_preference: float,
-        insert_task: int,
-        other_max: int,
-        total_missed: int,
-        total_length: int,
-        total_preference: float,
-        tasks: TaskBatch,
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-        hour: int,
-    ) -> tuple[
-        tuple[int, int, int, float],
-        int,
-        int,
-        tuple[int, int, float],
-    ] | None:
-        """Find this worker's best insertion without a Python call per position.
-
-        This is algebraically identical to calling
-        ``_route_metrics_with_insertion_fast`` for every legal insertion
-        position and comparing ``(objective, local, position)``.  Values that
-        are constant across positions (inserted-task coordinates/deadline,
-        worker preference, day overflow baseline) are hoisted out of the inner
-        loop.  This preserves the route scheduler's tie-breaking while reducing
-        the hottest Python call/indexing overhead in a full solve.
-        """
-
-        route_len = len(route)
-        if first_position > route_len:
-            return None
-
-        target_x = tasks.target_x[environment, player]
-        target_y = tasks.target_y[environment, player]
-        deadlines = tasks.deadline[environment, player]
-
-        tx = int(target_x[insert_task])
-        ty = int(target_y[insert_task])
-        deadline = int(deadlines[insert_task])
-
-        preference_add = 0.0
-        worker_role = int(unit_role[environment, player, worker])
-        task_role = int(tasks.work_role[environment, player, insert_task])
-        if worker_role != int(WorkRole.ANY) and worker_role == task_role:
-            preference_add += role_bonus
-
-        worker_zone = int(unit_zone[environment, player, worker])
-        if (
-            worker_zone != int(WorkZone.ANY)
-            and worker_zone == int(task_zone[environment, player, insert_task])
-        ):
-            preference_add += zone_bonus
-
-        if (
-            self._previous_task is not None
-            and insert_task
-            == int(self._previous_task[environment, player, worker])
-        ):
-            preference_add += self.continuity_bonus
-
-        new_preference = old_preference + preference_add
-        objective_preference = -(
-            total_preference - old_preference + new_preference
-        )
-
-        remaining_turns = self.turns_per_day - hour
-        old_overflow = max(0, old_length - remaining_turns)
-        base_deadline_misses = old_missed - old_overflow
-        base_total_missed = total_missed - old_missed
-        base_total_length = total_length - old_length
-
-        prev_x = route_cache.prev_x
-        prev_y = route_cache.prev_y
-        elapsed_before = route_cache.elapsed_before
-        suffix_new_misses = route_cache.suffix_new_misses
-
-        best_key: tuple[tuple[int, int, int, float], int, int] | None = None
-        best_metrics: tuple[int, int, float] | None = None
-        best_position = -1
-
-        # Positions are visited in ascending order.  The original candidate
-        # tuple used position as the final tie-break, so retaining the first
-        # equal objective exactly preserves that behavior.
-        for position in range(first_position, route_len + 1):
-            px = int(prev_x[position])
-            py = int(prev_y[position])
-            to_insert = abs(px - tx) + abs(py - ty)
-
-            if position < route_len:
-                next_task = route[position]
-                nx = int(target_x[next_task])
-                ny = int(target_y[next_task])
-                delta = (
-                    to_insert
-                    + abs(tx - nx)
-                    + abs(ty - ny)
-                    - abs(px - nx)
-                    - abs(py - ny)
-                    + 1
-                )
-            else:
-                delta = to_insert + 1
-
-            cand_length = old_length + delta
-            inserted_completion = int(elapsed_before[position]) + to_insert + 1
-
-            cand_deadline_misses = base_deadline_misses
-            completion_hour = hour + inserted_completion - 1
-            if deadline >= 0 and completion_hour > deadline:
-                cand_deadline_misses += 1
-            cand_deadline_misses += int(suffix_new_misses[position, delta])
-
-            cand_missed = cand_deadline_misses + max(
-                0, cand_length - remaining_turns
-            )
-            objective = (
-                base_total_missed + cand_missed,
-                max(other_max, cand_length),
-                base_total_length + cand_length,
-                objective_preference,
-            )
-            key = (objective, local, position)
-            if best_key is None or key < best_key:
-                best_key = key
-                best_position = position
-                best_metrics = (cand_missed, cand_length, new_preference)
-
-        if best_key is None or best_metrics is None:
-            return None
-        return best_key[0], local, best_position, best_metrics
-
-    def _route_metrics_with_insertion_fast(
-        self,
-        *,
-        environment: int,
-        player: int,
-        worker: int,
-        route: list[int],
-        route_cache: _RouteEvalCache,
-        old_missed: int,
-        old_length: int,
-        old_preference: float,
-        insert_task: int,
-        insert_position: int,
-        tasks: TaskBatch,
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-        hour: int,
-    ) -> tuple[int, int, float]:
-        """Exact V2 insertion objective using cached route statistics."""
-
-        px = int(route_cache.prev_x[insert_position])
-        py = int(route_cache.prev_y[insert_position])
-        elapsed_before = int(route_cache.elapsed_before[insert_position])
-
-        tx = int(tasks.target_x[environment, player, insert_task])
-        ty = int(tasks.target_y[environment, player, insert_task])
-        to_insert = abs(px - tx) + abs(py - ty)
-
-        if insert_position < len(route):
-            next_task = route[insert_position]
-            nx = int(tasks.target_x[environment, player, next_task])
-            ny = int(tasks.target_y[environment, player, next_task])
-            delta = (
-                to_insert
-                + abs(tx - nx)
-                + abs(ty - ny)
-                - abs(px - nx)
-                - abs(py - ny)
-                + 1
-            )
-        else:
-            delta = to_insert + 1
-
-        new_length = old_length + delta
-        inserted_completion = elapsed_before + to_insert + 1
-
-        remaining_turns = self.turns_per_day - hour
-        old_overflow = max(0, old_length - remaining_turns)
-        deadline_misses = old_missed - old_overflow
-
-        deadline = int(tasks.deadline[environment, player, insert_task])
-        completion_hour = hour + inserted_completion - 1
-        if deadline >= 0 and completion_hour > deadline:
-            deadline_misses += 1
-
-        deadline_misses += int(
-            route_cache.suffix_new_misses[insert_position, delta]
-        )
-        new_missed = deadline_misses + max(
-            0,
-            new_length - remaining_turns,
-        )
-
-        preference = old_preference
-        worker_role = int(unit_role[environment, player, worker])
-        task_role = int(tasks.work_role[environment, player, insert_task])
-        if worker_role != int(WorkRole.ANY) and worker_role == task_role:
-            preference += role_bonus
-
-        worker_zone = int(unit_zone[environment, player, worker])
-        if (
-            worker_zone != int(WorkZone.ANY)
-            and worker_zone
-            == int(task_zone[environment, player, insert_task])
-        ):
-            preference += zone_bonus
-
-        if (
-            self._previous_task is not None
-            and insert_task
-            == int(self._previous_task[environment, player, worker])
-        ):
-            preference += self.continuity_bonus
-
-        return new_missed, new_length, preference
-
-    def _route_metrics_with_insertion_reference(
-        self,
-        *,
-        environment: int,
-        player: int,
-        worker: int,
-        start_x: int,
-        start_y: int,
-        route: list[int],
-        insert_task: int,
-        insert_position: int,
-        tasks: TaskBatch,
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-        hour: int,
-    ) -> tuple[int, int, float]:
-        """Evaluate one hypothetical insertion without copying the route."""
-
-        x = start_x
-        y = start_y
-        elapsed = 0
-        missed_deadlines = 0
-        preference = 0.0
-
-        previous = (
-            -1
-            if self._previous_task is None
-            else int(
-                self._previous_task[
-                    environment,
-                    player,
-                    worker,
-                ]
-            )
-        )
-
-        worker_role = int(
-            unit_role[
+            required_count = tasks.required_count[
                 environment,
                 player,
-                worker,
-            ]
-        )
-        worker_zone = int(
-            unit_zone[
+                active_tasks,
+            ].astype(np.int64, copy=False)
+
+            safe_item = np.maximum(required_item, 0)
+
+            carried = inventories[
                 environment,
                 player,
-                worker,
+                active_units[:, None],
+                safe_item[None, :],
             ]
-        )
 
-        route_len = len(route)
+            eligible = (
+                (required_item[None, :] < 0)
+                | (carried >= required_count[None, :])
+            )
 
-        for index in range(route_len + 1):
-            if index == insert_position:
-                task = insert_task
-            else:
-                route_index = index if index < insert_position else index - 1
-                if route_index >= route_len:
-                    continue
-                task = route[route_index]
+            deposit_columns = (
+                tasks.kind[
+                    environment,
+                    player,
+                    active_tasks,
+                ]
+                == int(TaskKind.DEPOSIT_INVENTORY)
+            )
 
-            tx = int(
-                tasks.target_x[
+            if np.any(deposit_columns):
+                carrying = (
+                    inventories[
+                        environment,
+                        player,
+                        active_units,
+                    ].sum(axis=-1)
+                    > 0
+                )
+                eligible[:, deposit_columns] &= carrying[:, None]
+
+            return np.ascontiguousarray(eligible, dtype=np.bool_)
+
+    def _assignment_score(
+            self,
+            environment: int,
+            player: int,
+            worker: int,
+            task: int,
+            unit_x: NDArray[np.int16],
+            unit_y: NDArray[np.int16],
+            tasks: TaskBatch,
+            unit_role: NDArray[np.int16],
+            unit_zone: NDArray[np.int16],
+            task_zone: NDArray[np.int16],
+            role_bonus: float,
+            zone_bonus: float,
+        ) -> float:
+            distance = abs(
+                int(unit_x[environment, player, worker])
+                - int(tasks.target_x[environment, player, task])
+            ) + abs(
+                int(unit_y[environment, player, worker])
+                - int(tasks.target_y[environment, player, task])
+            )
+
+            score = float(
+                tasks.priority[
                     environment,
                     player,
                     task,
                 ]
-            )
-            ty = int(
-                tasks.target_y[
-                    environment,
-                    player,
-                    task,
-                ]
-            )
-
-            elapsed += abs(x - tx) + abs(y - ty) + 1
-            x = tx
-            y = ty
-
-            deadline = int(
-                tasks.deadline[
-                    environment,
-                    player,
-                    task,
-                ]
-            )
-            completion_hour = hour + elapsed - 1
-            if deadline >= 0 and completion_hour > deadline:
-                missed_deadlines += 1
+            ) - distance
 
             task_role = int(
                 tasks.work_role[
@@ -2050,12 +1165,26 @@ class TaskScheduler:
                     task,
                 ]
             )
+            worker_role = int(
+                unit_role[
+                    environment,
+                    player,
+                    worker,
+                ]
+            )
             if (
                 worker_role != int(WorkRole.ANY)
                 and worker_role == task_role
             ):
-                preference += role_bonus
+                score += role_bonus
 
+            worker_zone = int(
+                unit_zone[
+                    environment,
+                    player,
+                    worker,
+                ]
+            )
             if (
                 worker_zone != int(WorkZone.ANY)
                 and worker_zone
@@ -2067,204 +1196,118 @@ class TaskScheduler:
                     ]
                 )
             ):
-                preference += zone_bonus
+                score += zone_bonus
 
-            if task == previous:
-                preference += self.continuity_bonus
+            if (
+                self._previous_task is not None
+                and int(
+                    self._previous_task[
+                        environment,
+                        player,
+                        worker,
+                    ]
+                )
+                == task
+            ):
+                score += self.continuity_bonus
 
-        remaining_turns = self.turns_per_day - hour
-        missed_deadlines += max(
-            0,
-            elapsed - remaining_turns,
-        )
-
-        return (
-            missed_deadlines,
-            elapsed,
-            preference,
-        )
-
-    def _assignment_score(
-        self,
-        environment: int,
-        player: int,
-        worker: int,
-        task: int,
-        unit_x: NDArray[np.int16],
-        unit_y: NDArray[np.int16],
-        tasks: TaskBatch,
-        unit_role: NDArray[np.int16],
-        unit_zone: NDArray[np.int16],
-        task_zone: NDArray[np.int16],
-        role_bonus: float,
-        zone_bonus: float,
-    ) -> float:
-        distance = abs(
-            int(unit_x[environment, player, worker])
-            - int(tasks.target_x[environment, player, task])
-        ) + abs(
-            int(unit_y[environment, player, worker])
-            - int(tasks.target_y[environment, player, task])
-        )
-
-        score = float(
-            tasks.priority[
-                environment,
-                player,
-                task,
-            ]
-        ) - distance
-
-        task_role = int(
-            tasks.work_role[
-                environment,
-                player,
-                task,
-            ]
-        )
-        worker_role = int(
-            unit_role[
-                environment,
-                player,
-                worker,
-            ]
-        )
-        if (
-            worker_role != int(WorkRole.ANY)
-            and worker_role == task_role
-        ):
-            score += role_bonus
-
-        worker_zone = int(
-            unit_zone[
-                environment,
-                player,
-                worker,
-            ]
-        )
-        if (
-            worker_zone != int(WorkZone.ANY)
-            and worker_zone
-            == int(
-                task_zone[
-                    environment,
-                    player,
-                    task,
-                ]
-            )
-        ):
-            score += zone_bonus
-
-        if (
-            self._previous_task is not None
-            and int(
-                self._previous_task[
-                    environment,
-                    player,
-                    worker,
-                ]
-            )
-            == task
-        ):
-            score += self.continuity_bonus
-
-        return score
+            return score
 
     @staticmethod
     def _prefer_local_task(
-        environment: int,
-        player: int,
-        active_units: NDArray[np.int64],
-        claimed: set[int],
-        assignments: TaskAssignments,
-        tasks: TaskBatch,
-        unit_x: NDArray[np.int16],
-        unit_y: NDArray[np.int16],
-        inventories: NDArray[np.int64],
-        priority_slack: float = 5.0,
-    ) -> None:
-        for worker_value in active_units:
-            worker = int(worker_value)
-            local = (
-                int(unit_y[environment, player, worker]) * tasks.board_size
-                + int(unit_x[environment, player, worker])
-            )
+            environment: int,
+            player: int,
+            active_units: NDArray[np.int64],
+            claimed: set[int],
+            assignments: TaskAssignments,
+            tasks: TaskBatch,
+            unit_x: NDArray[np.int16],
+            unit_y: NDArray[np.int16],
+            inventories: NDArray[np.int64],
+            priority_slack: float = 5.0,
+        ) -> None:
+            for worker_value in active_units:
+                worker = int(worker_value)
+                local = (
+                    int(unit_y[environment, player, worker]) * tasks.board_size
+                    + int(unit_x[environment, player, worker])
+                )
 
-            if (
-                local >= tasks.tile_slots
-                or not tasks.active[environment, player, local]
-                or local in claimed
-            ):
-                continue
+                if (
+                    local >= tasks.tile_slots
+                    or not tasks.active[environment, player, local]
+                    or local in claimed
+                ):
+                    continue
 
-            required = int(
-                tasks.required_item[
-                    environment,
-                    player,
-                    local,
-                ]
-            )
+                required = int(
+                    tasks.required_item[
+                        environment,
+                        player,
+                        local,
+                    ]
+                )
 
-            if (
-                required >= 0
-                and inventories[
-                    environment,
-                    player,
-                    worker,
-                    required,
-                ]
-                < tasks.required_count[
-                    environment,
-                    player,
-                    local,
-                ]
-            ):
-                continue
+                if (
+                    required >= 0
+                    and inventories[
+                        environment,
+                        player,
+                        worker,
+                        required,
+                    ]
+                    < tasks.required_count[
+                        environment,
+                        player,
+                        local,
+                    ]
+                ):
+                    continue
 
-            current = int(
+                current = int(
+                    assignments.task_index[
+                        environment,
+                        player,
+                        worker,
+                    ]
+                )
+
+                current_priority = (
+                    float(
+                        tasks.priority[
+                            environment,
+                            player,
+                            current,
+                        ]
+                    )
+                    if current >= 0
+                    else -np.inf
+                )
+                local_priority = float(
+                    tasks.priority[
+                        environment,
+                        player,
+                        local,
+                    ]
+                )
+
+                if local_priority + priority_slack < current_priority:
+                    continue
+
+                if current >= 0:
+                    claimed.discard(current)
+
                 assignments.task_index[
                     environment,
                     player,
                     worker,
-                ]
-            )
-
-            current_priority = (
-                float(
-                    tasks.priority[
-                        environment,
-                        player,
-                        current,
-                    ]
-                )
-                if current >= 0
-                else -np.inf
-            )
-            local_priority = float(
-                tasks.priority[
+                ] = local
+                assignments.score[
                     environment,
                     player,
-                    local,
-                ]
-            )
-
-            if local_priority + priority_slack < current_priority:
-                continue
-
-            if current >= 0:
-                claimed.discard(current)
-
-            assignments.task_index[
-                environment,
-                player,
-                worker,
-            ] = local
-            assignments.score[
-                environment,
-                player,
-                worker,
-            ] = local_priority * 1_000.0
-            claimed.add(local)
+                    worker,
+                ] = local_priority * 1_000.0
+                claimed.add(local)
 
 class TaskExecutor:
     """Convert task assignments into masked movement or interaction actions."""
