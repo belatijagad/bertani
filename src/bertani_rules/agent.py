@@ -68,6 +68,11 @@ SEED_BUY_BATCHES = {
     Item.MELON: 12,
 }
 
+# Earliest crop age at which this policy can realize a harvest.  Used only to
+# stop starting new crop cohorts that cannot pay out before the season ends.
+# Order matches the five crop Item indices used by target_crop_counts.
+CROP_HARVEST_DAYS = np.asarray((4, 3, 8, 10, 10), dtype=np.int64)
+
 # Exact center-out structure order shared by the sampled 55463512 replays.
 # The first 14 slots are the standard three-quadrant plan; the last four are
 # added only by the duplicated-Yarn-Store sheep branch.
@@ -399,7 +404,16 @@ class IntentPlanner:
             12,
             target_animal_counts[..., 2],
         )
-        target_crop_counts[features.day >= total_days - 2] = 0
+        # Do not start a new crop cohort unless it can reach this policy's
+        # harvest age before the final day.  This replaces the old blanket
+        # two-day cutoff, which was far too late for Tomato/Strawberry/Melon.
+        remaining_days = total_days - features.day
+        crop_viable = remaining_days[..., None] > CROP_HARVEST_DAYS
+        target_crop_counts = np.where(
+            crop_viable,
+            target_crop_counts,
+            0,
+        )
         target_crop_counts[phase == RulePhase.LIQUIDATION] = 0
         return StrategicIntent(
             phase=phase,
