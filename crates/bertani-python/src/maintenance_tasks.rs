@@ -403,12 +403,24 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     let needs_water = plants
                         && !watered_or_fed
                         && (consecutive_missed >= 1.0 || yield_water);
+
+                    let one_time_final_water =
+                        one_time_ready && (wheat_bonus || carrot_bonus || melon_bonus);
+
+                    let normal_water_priority = 105.0 + 20.0 * consecutive_missed;
+
+                    let water_priority = if one_time_final_water {
+                        normal_water_priority.max(115.0)
+                    } else {
+                        normal_water_priority
+                    };
+
                     if needs_water {
                         propose_tile(
                             &mut out,
                             output_index,
                             TASK_WATER,
-                            105.0 + 20.0 * consecutive_missed,
+                            water_priority,
                             deadline,
                             0.0,
                             -1,
