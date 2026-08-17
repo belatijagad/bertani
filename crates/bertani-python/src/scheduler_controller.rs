@@ -664,12 +664,6 @@ impl NativeTaskScheduler {
             out_score,
         )?;
 
-        self.caches[seat] = Some(SeatCache {
-            day,
-            units: active_units.clone(),
-            routes: routes.clone(),
-        });
-
         let any_fetch = active_units.iter().any(|&worker| {
             let assigned = out_task_index[unit_offset + worker];
             assigned >= 0 && task_kind[assigned as usize] == TASK_FETCH_ITEM
@@ -688,6 +682,15 @@ impl NativeTaskScheduler {
                 break;
             }
         }
+
+        // `routes` is no longer needed by this solve after local-override
+        // detection, so move it into the persistent cache instead of cloning
+        // every worker route on every full solve.
+        self.caches[seat] = Some(SeatCache {
+            day,
+            units: active_units.clone(),
+            routes,
+        });
         Ok(())
     }
 

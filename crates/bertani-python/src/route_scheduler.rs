@@ -15,11 +15,12 @@ const TASK_KIND_DEPOSIT_INVENTORY: i16 = 13;
 const ROLE_ANY: i16 = 0;
 const ZONE_ANY: i16 = -1;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct RouteEvalCache {
     prev_x: Vec<i16>,
     prev_y: Vec<i16>,
     elapsed_before: Vec<i32>,
+    completion: Vec<i32>,
     suffix_new_misses: Vec<i16>,
     suffix_width: usize,
 }
@@ -131,8 +132,9 @@ fn top_two_lengths(lengths: &[i32]) -> (i32, i32, usize) {
     (max1, max2, count)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_route_eval_cache(
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+fn rebuild_route_eval_cache(
+    cache: &mut RouteEvalCache,
     start_x: i16,
     start_y: i16,
     route: &[usize],
@@ -141,44 +143,52 @@ fn build_route_eval_cache(
     deadlines: &[i16],
     hour: i32,
     board_size: usize,
-) -> RouteEvalCache {
+) {
     let route_len = route.len();
-    let mut prev_x = vec![0_i16; route_len + 1];
-    let mut prev_y = vec![0_i16; route_len + 1];
-    let mut elapsed_before = vec![0_i32; route_len + 1];
-    let mut completion = vec![0_i32; route_len];
+    cache.prev_x.resize(route_len + 1, 0);
+    cache.prev_y.resize(route_len + 1, 0);
+    cache.elapsed_before.resize(route_len + 1, 0);
+    cache.completion.resize(route_len, 0);
 
     let mut x = start_x;
     let mut y = start_y;
     let mut elapsed = 0_i32;
 
     for (index, &task) in route.iter().enumerate() {
-        prev_x[index] = x;
-        prev_y[index] = y;
-        elapsed_before[index] = elapsed;
+        cache.prev_x[index] = x;
+        cache.prev_y[index] = y;
+        cache.elapsed_before[index] = elapsed;
 
         let tx = target_x[task];
         let ty = target_y[task];
         elapsed += i32::from((x - tx).abs()) + i32::from((y - ty).abs()) + 1;
-        completion[index] = elapsed;
+        cache.completion[index] = elapsed;
         x = tx;
         y = ty;
     }
 
-    prev_x[route_len] = x;
-    prev_y[route_len] = y;
-    elapsed_before[route_len] = elapsed;
+    cache.prev_x[route_len] = x;
+    cache.prev_y[route_len] = y;
+    cache.elapsed_before[route_len] = elapsed;
 
     // Exact bound for d(prev,new)+d(new,next)-d(prev,next)+1 on a square grid.
     let max_delta = 4 * board_size.saturating_sub(1) + 1;
-    let mut suffix_hist = vec![0_i16; (route_len + 1) * max_delta];
+    let suffix_width = max_delta + 1;
+    cache.suffix_width = suffix_width;
+    cache
+        .suffix_new_misses
+        .resize((route_len + 1) * suffix_width, 0);
+    cache.suffix_new_misses.fill(0);
 
+    // Row `position` stores, for each insertion delta, how many existing
+    // deadline-feasible suffix tasks become newly late after that delay.  Build
+    // it directly from the next row so we do not allocate the old histogram
+    // scratch buffer on every route-cache rebuild.
     for index in (0..route_len).rev() {
-        let row = index * max_delta;
-        let next_row = (index + 1) * max_delta;
-        for delta in 0..max_delta {
-            suffix_hist[row + delta] = suffix_hist[next_row + delta];
-        }
+        let row = index * suffix_width;
+        let next_row = (index + 1) * suffix_width;
+        let (before_next, next_and_after) = cache.suffix_new_misses.split_at_mut(next_row);
+        before_next[row..row + suffix_width].copy_from_slice(&next_and_after[..suffix_width]);
 
         let task = route[index];
         let deadline = deadlines[task];
@@ -186,35 +196,24 @@ fn build_route_eval_cache(
             continue;
         }
 
-        let completion_hour = hour + completion[index] - 1;
+        let completion_hour = hour + cache.completion[index] - 1;
         let slack = i32::from(deadline) - completion_hour;
-        if slack >= 0 {
-            if let Ok(slack) = usize::try_from(slack) {
-                if slack < max_delta {
-                    suffix_hist[row + slack] += 1;
-                }
-            }
+        if slack < 0 {
+            continue;
         }
-    }
-
-    let suffix_width = max_delta + 1;
-    let mut suffix_new_misses = vec![0_i16; (route_len + 1) * suffix_width];
-    for position in 0..=route_len {
-        let hist_row = position * max_delta;
-        let out_row = position * suffix_width;
-        let mut cumulative = 0_i16;
-        for delta in 0..max_delta {
-            cumulative += suffix_hist[hist_row + delta];
-            suffix_new_misses[out_row + delta + 1] = cumulative;
+        let Ok(slack) = usize::try_from(slack) else {
+            continue;
+        };
+        if slack >= max_delta {
+            continue;
         }
-    }
 
-    RouteEvalCache {
-        prev_x,
-        prev_y,
-        elapsed_before,
-        suffix_new_misses,
-        suffix_width,
+        // A suffix task with slack=s becomes newly late exactly when the
+        // insertion adds delta > s. This matches the old histogram+cumulative
+        // representation byte-for-byte in meaning.
+        for delta in (slack + 1)..=max_delta {
+            before_next[row + delta] += 1;
+        }
     }
 }
 
@@ -419,22 +418,30 @@ pub(crate) fn solve_routes_core(
     urgency_bands.dedup_by(|left, right| *left == *right);
 
     let mut prefix_length = vec![0_usize; worker_count];
+    // Keep each worker's route-evaluation buffers alive after an insertion.
+    // Only their contents become invalid; retaining capacity avoids repeatedly
+    // allocating prefix/suffix scratch while building the same full solve.
     let mut route_eval_cache = (0..worker_count)
-        .map(|_| None::<RouteEvalCache>)
+        .map(|_| RouteEvalCache::default())
         .collect::<Vec<_>>();
+    let mut route_eval_cache_valid = vec![false; worker_count];
     let mut route_missed = vec![0_i32; worker_count];
     let mut route_length = vec![0_i32; worker_count];
     let mut route_preference = vec![0_f32; worker_count];
     let mut total_missed = 0_i32;
     let mut total_length = 0_i32;
     let mut total_preference = 0.0_f64;
+    let mut tier_tasks = Vec::<usize>::new();
+    let mut ranking = Vec::<(i32, usize, usize)>::new();
 
     for urgency_band in urgency_bands {
-        let tier_tasks = exclusive_tasks
-            .iter()
-            .copied()
-            .filter(|&task| urgency(priorities[task]) == urgency_band)
-            .collect::<Vec<_>>();
+        tier_tasks.clear();
+        tier_tasks.extend(
+            exclusive_tasks
+                .iter()
+                .copied()
+                .filter(|&task| urgency(priorities[task]) == urgency_band),
+        );
         if tier_tasks.is_empty() {
             continue;
         }
@@ -463,7 +470,7 @@ pub(crate) fn solve_routes_core(
         };
         let max_workers = worker_count.saturating_sub(future_reserve).max(1);
 
-        let mut ranking = Vec::<(i32, usize, usize)>::new();
+        ranking.clear();
         for local in 0..worker_count {
             let (start_x, start_y) = if let Some(&endpoint_task) = routes[local].last() {
                 (target_x[endpoint_task], target_y[endpoint_task])
@@ -493,17 +500,12 @@ pub(crate) fn solve_routes_core(
             }
         }
         ranking.sort_unstable();
-        let candidate_locals = ranking
-            .into_iter()
-            .take(max_workers)
-            .map(|(_, _, local)| local)
-            .collect::<Vec<_>>();
-        if candidate_locals.is_empty() {
+        ranking.truncate(max_workers);
+        if ranking.is_empty() {
             continue;
         }
 
-        let mut ordered_tasks = tier_tasks;
-        ordered_tasks.sort_by(|&left, &right| {
+        tier_tasks.sort_by(|&left, &right| {
             deadline_key(deadlines[left], hour)
                 .cmp(&deadline_key(deadlines[right], hour))
                 .then_with(|| {
@@ -514,11 +516,11 @@ pub(crate) fn solve_routes_core(
                 .then_with(|| left.cmp(&right))
         });
 
-        for task in ordered_tasks {
+        for &task in &tier_tasks {
             let (max1, max2, max1_count) = top_two_lengths(&route_length);
             let mut best: Option<Candidate> = None;
 
-            for &local in &candidate_locals {
+            for &(_, _, local) in &ranking {
                 if !is_eligible(
                     local,
                     task,
@@ -540,8 +542,9 @@ pub(crate) fn solve_routes_core(
                     max1
                 };
 
-                if route_eval_cache[local].is_none() {
-                    route_eval_cache[local] = Some(build_route_eval_cache(
+                if !route_eval_cache_valid[local] {
+                    rebuild_route_eval_cache(
+                        &mut route_eval_cache[local],
                         starts_x[local],
                         starts_y[local],
                         &routes[local],
@@ -550,11 +553,10 @@ pub(crate) fn solve_routes_core(
                         deadlines,
                         hour,
                         board_size,
-                    ));
+                    );
+                    route_eval_cache_valid[local] = true;
                 }
-                let Some(cache) = route_eval_cache[local].as_ref() else {
-                    continue;
-                };
+                let cache = &route_eval_cache[local];
 
                 if let Some(candidate) = best_insertion_for_worker(
                     local,
@@ -599,7 +601,7 @@ pub(crate) fn solve_routes_core(
             let old_preference = f64::from(route_preference[local]);
 
             routes[local].insert(best.position, task);
-            route_eval_cache[local] = None;
+            route_eval_cache_valid[local] = false;
             route_missed[local] = best.new_missed;
             route_length[local] = best.new_length;
             route_preference[local] = best.new_preference as f32;
