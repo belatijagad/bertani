@@ -60,6 +60,14 @@ SALE_BATCHES = {
     Item.FERTILIZER: 18,
 }
 
+# Product base prices indexed by Item. Current market-price observations are
+# encoded as price/base, so these reconstruct the current quotes closely enough
+# for small, targeted land-financing sales.
+MARKET_BASE_PRICES = np.asarray(
+    (25, 35, 60, 120, 250, 50, 160, 200, 100),
+    dtype=np.float64,
+)
+
 SEED_BUY_BATCHES = {
     Item.WHEAT: 8,
     Item.CARROT: 4,
@@ -1264,6 +1272,123 @@ class EconomyMarketRule:
         unlocked = np.rint(farms[..., 4:8].sum(axis=-1)).astype(np.int64)
         day = step // self.turns_per_day
 
+        # Land expansion is scheduled rather than opportunistic:
+        #   quadrant 2 -> day 7,  $1,000
+        #   quadrant 3 -> day 11, $2,000
+        #
+        # On day 6/day 10 we only protect the future land bankroll from
+        # discretionary livestock purchases. On the target day, if cash is
+        # still slightly short, sell just enough premium inventory BEFORE
+        # BUY_LAND. This preserves the existing economy instead of entering a
+        # broad "expansion mode".
+        next_land_cost = np.where(
+            unlocked == 1,
+            1_000,
+            np.where(unlocked == 2, 2_000, 0),
+        ).astype(np.int64)
+        next_land_day = np.where(
+            unlocked == 1,
+            7,
+            np.where(unlocked == 2, 11, -1),
+        ).astype(np.int64)
+
+        reserve_for_land = (
+            active
+            & (next_land_day >= 0)
+            & (day == (next_land_day - 1))
+        )
+        target_land_day = (
+            active
+            & (next_land_day >= 0)
+            & (day >= next_land_day)
+        )
+
+        land_shortfall = np.maximum(
+            0,
+            next_land_cost - money,
+        ).astype(np.int64)
+
+        current_prices = np.maximum(
+            1,
+            np.rint(ratios * MARKET_BASE_PRICES).astype(np.int64),
+        )
+
+        # Use Melon first because the existing strategy explicitly treats its
+        # second cohort as bridge capital. If that is insufficient, use Wool.
+        melon_price = current_prices[..., Item.MELON]
+        melon_needed = np.where(
+            melon_price > 0,
+            (land_shortfall + melon_price - 1) // melon_price,
+            0,
+        )
+        land_finance_melon = np.minimum(
+            shed[..., Item.MELON],
+            melon_needed,
+        )
+        estimated_after_melon = (
+            money + land_finance_melon * melon_price
+        )
+
+        remaining_shortfall = np.maximum(
+            0,
+            next_land_cost - estimated_after_melon,
+        ).astype(np.int64)
+        wool_price = current_prices[..., Item.WOOL]
+        wool_needed = np.where(
+            wool_price > 0,
+            (remaining_shortfall + wool_price - 1) // wool_price,
+            0,
+        )
+        land_finance_wool = np.minimum(
+            shed[..., Item.WOOL],
+            wool_needed,
+        )
+
+        financing = target_land_day & (land_shortfall > 0)
+        plan.append(
+            financing & (land_finance_melon > 0),
+            MarketOp.SELL,
+            item=Item.MELON,
+            count=land_finance_melon,
+        )
+        plan.append(
+            financing & (land_finance_wool > 0),
+            MarketOp.SELL,
+            item=Item.WOOL,
+            count=land_finance_wool,
+        )
+
+        estimated_land_cash = (
+            money
+            + np.where(financing, land_finance_melon * melon_price, 0)
+            + np.where(financing, land_finance_wool * wool_price, 0)
+        )
+        scheduled_first_expansion = (
+            target_land_day
+            & (unlocked == 1)
+            & (estimated_land_cash >= 1_000)
+        )
+        scheduled_third_expansion = (
+            target_land_day
+            & (unlocked == 2)
+            & (estimated_land_cash >= 2_000)
+        )
+
+        # Keep the existing optional fourth-quadrant Yarn expansion unchanged.
+        yarn_expansion_early = (
+            active
+            & (day >= 12)
+            & (unlocked == 3)
+            & (intent.target_animal_counts[..., 2] >= 12)
+            & (money >= 4_000)
+        )
+        early_land_buy = (
+            scheduled_first_expansion
+            | scheduled_third_expansion
+            | yarn_expansion_early
+        )
+        plan.append(early_land_buy, MarketOp.BUY_LAND)
+
         # Wool is the bridge between the livestock opening and the second
         # crop field. A normal four-unit sale is price-efficient later, but it
         # strands cash in the shed during expansion. The reference baseline
@@ -1345,20 +1470,10 @@ class EconomyMarketRule:
             count=wheat_count,
         )
 
-        first_expansion = (day >= 6) & (unlocked < 2) & (money >= 1_000)
-        standard_expansion = (
-            (day >= 11) & (unlocked == 2) & (money >= 2_000)
-        )
-        yarn_expansion = (
-            (day >= 12)
-            & (unlocked == 3)
-            & (intent.target_animal_counts[..., 2] >= 12)
-            & (money >= 4_000)
-        )
-        land_buy = active & (
-            first_expansion | standard_expansion | yarn_expansion
-        )
-        plan.append(land_buy, MarketOp.BUY_LAND)
+        # BUY_LAND was intentionally emitted before normal market sales so it
+        # cannot be pushed past the ten-order cap. Keep this mask for downstream
+        # cash budgeting.
+        land_buy = early_land_buy
 
         # Expansion is processed before replenishing feed so a routine Wheat
         # purchase cannot consume the cash earmarked for the day's land unlock.
@@ -1396,7 +1511,12 @@ class EconomyMarketRule:
         # Once the first expansion date arrives, do not let livestock consume
         # its cash while BUY_LAND is still unaffordable.
         expansion_ready = active & (
-            (day < 6) | (unlocked >= 2) | land_buy
+            (
+                (day < 6)
+                | (unlocked >= 2)
+                | land_buy
+            )
+            & ~reserve_for_land
         )
         land_cost = np.choose(np.minimum(unlocked, 3), (0, 1_000, 2_000, 4_000))
         # Sheep expansion is more expensive to maintain than its purchase
@@ -1408,8 +1528,18 @@ class EconomyMarketRule:
             800,
             np.where(day < 6, 0, 200),
         )
+        scheduled_land_reserve = np.where(
+            reserve_for_land,
+            next_land_cost,
+            0,
+        )
+
         budget = np.maximum(
-            0, money - animal_cash_reserve - land_buy * land_cost
+            0,
+            money
+            - animal_cash_reserve
+            - scheduled_land_reserve
+            - land_buy * land_cost,
         ).astype(np.int64)
         buy_sheep = np.minimum(missing_sheep, budget // 500)
         budget -= buy_sheep * 500
