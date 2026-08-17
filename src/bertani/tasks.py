@@ -300,6 +300,18 @@ class TaskScheduler:
         self._assignments: TaskAssignments | None = None
         self._previous_task: NDArray[np.int64] | None = None
 
+        # Persistent per-seat route plans. Routes contain stable TaskBatch slot
+        # ids, not primitive movement actions. Tile slots remain stable as a
+        # tile transitions FEED -> CARE -> HARVEST, HARVEST -> PLANT, etc.
+        self._route_cache: dict[tuple[int, int], dict[int, list[int]]] = {}
+        self._route_cache_day: dict[tuple[int, int], int] = {}
+        self._route_cache_units: dict[tuple[int, int], tuple[int, ...]] = {}
+        self._force_replan: set[tuple[int, int]] = set()
+
+        # Lightweight profiling counters.
+        self.full_solves = 0
+        self.cache_hits = 0
+
     def assign(
         self,
         batch: Batch,
@@ -316,6 +328,10 @@ class TaskScheduler:
             )
             self._previous_task = np.full(shape, -1, dtype=np.int64)
             self._shape = shape
+            self._route_cache.clear()
+            self._route_cache_day.clear()
+            self._route_cache_units.clear()
+            self._force_replan.clear()
 
         assignments = self._assignments
         assert self._previous_task is not None
@@ -327,6 +343,7 @@ class TaskScheduler:
             views.global_features[..., 0] * self.last_step
         ).astype(np.int64)
         hour = step % self.turns_per_day
+        day = step // self.turns_per_day
 
         new_day = hour == 0
         self._previous_task[new_day] = -1
@@ -398,6 +415,7 @@ class TaskScheduler:
                     zone_bonus=zone_bonus,
                     reserved_by_kind=reserved_by_kind,
                     hour=int(hour[environment, player]),
+                    day=int(day[environment, player]),
                 )
 
         self._previous_task[...] = assignments.task_index
@@ -422,13 +440,41 @@ class TaskScheduler:
         zone_bonus: float,
         reserved_by_kind: NDArray[np.int16],
         hour: int,
+        day: int,
     ) -> None:
         active_units = np.flatnonzero(batch.active_units[environment, player])
         active_tasks = np.flatnonzero(tasks.active[environment, player])
 
         if active_units.size == 0 or active_tasks.size == 0:
+            key = (environment, player)
+            self._route_cache.pop(key, None)
+            self._route_cache_day.pop(key, None)
+            self._route_cache_units.pop(key, None)
+            self._force_replan.discard(key)
             return
 
+        if self._serve_cached_routes(
+            environment=environment,
+            player=player,
+            day=day,
+            active_units=active_units,
+            active_tasks=active_tasks,
+            batch=batch,
+            tasks=tasks,
+            assignments=assignments,
+            unit_x=unit_x,
+            unit_y=unit_y,
+            inventories=inventories,
+            unit_role=unit_role,
+            unit_zone=unit_zone,
+            task_zone=task_zone,
+            role_bonus=role_bonus,
+            zone_bonus=zone_bonus,
+        ):
+            self.cache_hits += 1
+            return
+
+        self.full_solves += 1
         worker_count = int(active_units.size)
         starts_x = unit_x[environment, player, active_units].astype(
             np.int16, copy=False
@@ -717,6 +763,339 @@ class TaskScheduler:
             unit_y,
             inventories,
         )
+
+        key = (environment, player)
+        self._route_cache[key] = {
+            int(active_units[local]): list(route)
+            for local, route in enumerate(routes)
+        }
+        self._route_cache_day[key] = day
+        self._route_cache_units[key] = tuple(
+            int(worker) for worker in active_units
+        )
+
+        # FETCH_ITEM is intentionally a one-turn logistics task in V2. Once a
+        # pickup executes, worker eligibility changes, so solve again next turn.
+        assigned_indices = assignments.task_index[
+            environment,
+            player,
+            active_units,
+        ]
+        assigned_mask = assigned_indices >= 0
+        if np.any(assigned_mask):
+            assigned_kinds = tasks.kind[
+                environment,
+                player,
+                assigned_indices[assigned_mask],
+            ]
+            if np.any(assigned_kinds == int(TaskKind.FETCH_ITEM)):
+                self._force_replan.add(key)
+
+        # The underfoot override may intentionally deviate from the route's
+        # first planned task. Replan next turn instead of mutating the cached
+        # route in a potentially inconsistent way.
+        for local, worker_value in enumerate(active_units):
+            worker = int(worker_value)
+            route = routes[local]
+            assigned_task = int(
+                assignments.task_index[
+                    environment,
+                    player,
+                    worker,
+                ]
+            )
+            planned_task = route[0] if route else -1
+            if assigned_task >= 0 and assigned_task != planned_task:
+                self._force_replan.add(key)
+                break
+
+    def _serve_cached_routes(
+        self,
+        *,
+        environment: int,
+        player: int,
+        day: int,
+        active_units: NDArray[np.int64],
+        active_tasks: NDArray[np.int64],
+        batch: Batch,
+        tasks: TaskBatch,
+        assignments: TaskAssignments,
+        unit_x: NDArray[np.int16],
+        unit_y: NDArray[np.int16],
+        inventories: NDArray[np.int64],
+        unit_role: NDArray[np.int16],
+        unit_zone: NDArray[np.int16],
+        task_zone: NDArray[np.int16],
+        role_bonus: float,
+        zone_bonus: float,
+    ) -> bool:
+        """Serve a still-valid day plan without running route construction.
+
+        A full replan is required only when:
+        - the day changed,
+        - the active worker set changed (hire/end-of-day),
+        - a previous FETCH_ITEM changed eligibility,
+        - a genuinely new exclusive task appears outside cached routes, or
+        - a cached route's next task is no longer executable by its worker.
+
+        Completed/inactive tasks are simply removed from cached routes.
+        """
+
+        key = (environment, player)
+        routes = self._route_cache.get(key)
+        if routes is None:
+            return False
+        if self._route_cache_day.get(key) != day:
+            return False
+
+        active_unit_tuple = tuple(int(worker) for worker in active_units)
+        if self._route_cache_units.get(key) != active_unit_tuple:
+            return False
+
+        if key in self._force_replan:
+            self._force_replan.discard(key)
+            return False
+
+        active_mask = tasks.active[environment, player]
+
+        # Drop jobs that another worker already completed or that disappeared.
+        # If the same tile changes from FEED to CARE/HARVEST, its slot remains
+        # active and therefore stays at the same place in the cached route.
+        planned: set[int] = set()
+        for worker in active_unit_tuple:
+            route = routes.get(worker)
+            if route is None:
+                return False
+            if route:
+                route[:] = [
+                    task for task in route
+                    if bool(active_mask[task])
+                ]
+                planned.update(route)
+
+        # A new exclusive task that was not visible during the last solve
+        # indicates a material state change: land/seed changes, a newly created
+        # production job, etc. Recompute to place it globally.
+        exclusive_active = active_tasks[
+            tasks.exclusive[
+                environment,
+                player,
+                active_tasks,
+            ]
+        ]
+        for task_value in exclusive_active:
+            if int(task_value) not in planned:
+                return False
+
+        claimed: set[int] = set()
+
+        for worker_value in active_units:
+            worker = int(worker_value)
+            route = routes[worker]
+            if not route:
+                continue
+
+            task = int(route[0])
+            required = int(
+                tasks.required_item[
+                    environment,
+                    player,
+                    task,
+                ]
+            )
+            if (
+                required >= 0
+                and inventories[
+                    environment,
+                    player,
+                    worker,
+                    required,
+                ]
+                < tasks.required_count[
+                    environment,
+                    player,
+                    task,
+                ]
+            ):
+                return False
+
+            # Deposit tasks require the worker to still be carrying something.
+            if (
+                int(
+                    tasks.kind[
+                        environment,
+                        player,
+                        task,
+                    ]
+                )
+                == int(TaskKind.DEPOSIT_INVENTORY)
+                and inventories[
+                    environment,
+                    player,
+                    worker,
+                ].sum()
+                <= 0
+            ):
+                return False
+
+            assignments.task_index[
+                environment,
+                player,
+                worker,
+            ] = task
+            assignments.score[
+                environment,
+                player,
+                worker,
+            ] = self._assignment_score(
+                environment,
+                player,
+                worker,
+                task,
+                unit_x,
+                unit_y,
+                tasks,
+                unit_role,
+                unit_zone,
+                task_zone,
+                role_bonus,
+                zone_bonus,
+            )
+            claimed.add(task)
+
+        # Preserve V2's cheap non-exclusive logistics behavior for otherwise
+        # idle workers. These are intentionally not persisted.
+        nonexclusive_tasks = active_tasks[
+            ~tasks.exclusive[
+                environment,
+                player,
+                active_tasks,
+            ]
+        ]
+        if nonexclusive_tasks.size:
+            for worker_value in active_units:
+                worker = int(worker_value)
+                if assignments.task_index[
+                    environment,
+                    player,
+                    worker,
+                ] >= 0:
+                    continue
+
+                best_choice: tuple[float, int] | None = None
+                for task_value in nonexclusive_tasks:
+                    task = int(task_value)
+
+                    required = int(
+                        tasks.required_item[
+                            environment,
+                            player,
+                            task,
+                        ]
+                    )
+                    if (
+                        required >= 0
+                        and inventories[
+                            environment,
+                            player,
+                            worker,
+                            required,
+                        ]
+                        < tasks.required_count[
+                            environment,
+                            player,
+                            task,
+                        ]
+                    ):
+                        continue
+
+                    if (
+                        int(
+                            tasks.kind[
+                                environment,
+                                player,
+                                task,
+                            ]
+                        )
+                        == int(TaskKind.DEPOSIT_INVENTORY)
+                        and inventories[
+                            environment,
+                            player,
+                            worker,
+                        ].sum()
+                        <= 0
+                    ):
+                        continue
+
+                    score = self._assignment_score(
+                        environment,
+                        player,
+                        worker,
+                        task,
+                        unit_x,
+                        unit_y,
+                        tasks,
+                        unit_role,
+                        unit_zone,
+                        task_zone,
+                        role_bonus,
+                        zone_bonus,
+                    )
+                    choice = (score, task)
+                    if best_choice is None or choice > best_choice:
+                        best_choice = choice
+
+                if best_choice is not None:
+                    score, task = best_choice
+                    assignments.task_index[
+                        environment,
+                        player,
+                        worker,
+                    ] = task
+                    assignments.score[
+                        environment,
+                        player,
+                        worker,
+                    ] = score
+                    if (
+                        int(
+                            tasks.kind[
+                                environment,
+                                player,
+                                task,
+                            ]
+                        )
+                        == int(TaskKind.FETCH_ITEM)
+                    ):
+                        self._force_replan.add(key)
+
+        before_local = assignments.task_index[
+            environment,
+            player,
+            active_units,
+        ].copy()
+
+        self._prefer_local_task(
+            environment,
+            player,
+            active_units,
+            claimed,
+            assignments,
+            tasks,
+            unit_x,
+            unit_y,
+            inventories,
+        )
+
+        after_local = assignments.task_index[
+            environment,
+            player,
+            active_units,
+        ]
+        if np.any(before_local != after_local):
+            self._force_replan.add(key)
+
+        return True
 
     @staticmethod
     def _top_two_lengths(
