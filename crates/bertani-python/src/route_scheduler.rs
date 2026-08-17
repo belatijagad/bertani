@@ -131,6 +131,7 @@ fn top_two_lengths(lengths: &[i32]) -> (i32, i32, usize) {
     (max1, max2, count)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_route_eval_cache(
     start_x: i16,
     start_y: i16,
@@ -217,7 +218,7 @@ fn build_route_eval_cache(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 fn best_insertion_for_worker(
     local: usize,
     route: &[usize],
@@ -340,6 +341,7 @@ fn best_insertion_for_worker(
 
 #[pyfunction]
 #[allow(
+    clippy::cast_possible_truncation,
     clippy::float_cmp,
     clippy::needless_pass_by_value,
     clippy::similar_names,

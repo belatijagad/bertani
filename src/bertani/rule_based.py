@@ -167,7 +167,9 @@ class VectorRulePolicy:
         self.profile_ns: dict[str, int] = {
             "opening": 0,
             "features_intent": 0,
-            "task_rules": 0,
+            "maintenance_tasks": 0,
+            "production_tasks": 0,
+            "other_tasks": 0,
             "workforce": 0,
             "scheduler": 0,
             "executor": 0,
@@ -257,11 +259,13 @@ class VectorRulePolicy:
 
         tasks = self._task_buffers(batch)
         tasks.clear()
-        started = time.perf_counter_ns() if self.profile else 0
         for rule in self.task_rules:
+            started = time.perf_counter_ns() if self.profile else 0
             rule.propose(batch, intent, tasks)
-        if self.profile:
-            self.profile_ns["task_rules"] += time.perf_counter_ns() - started
+            if self.profile:
+                key = getattr(rule, "profile_key", "other_tasks")
+                self.profile_ns.setdefault(key, 0)
+                self.profile_ns[key] += time.perf_counter_ns() - started
 
         assert self._task_scheduler is not None
         assert self._task_executor is not None

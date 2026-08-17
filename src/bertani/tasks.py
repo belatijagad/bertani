@@ -10,8 +10,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 try:
+    from ._rust import propose_maintenance_tasks as _propose_maintenance_tasks
     from ._rust import schedule_routes as _schedule_routes
 except (ImportError, ModuleNotFoundError):
+    _propose_maintenance_tasks = None
     _schedule_routes = None
 
 from .vec_env import Batch, Item, UnitOp
@@ -243,6 +245,53 @@ class TaskBatch:
         self.required_count[..., slot] = required_count
         self.exclusive[..., slot] = exclusive
         self.work_role[..., slot] = np.where(active, work_role, WorkRole.ANY)
+
+
+def propose_native_maintenance_tasks(
+    batch: Batch,
+    tasks: TaskBatch,
+    *,
+    turns_per_day: int,
+    shed_capacity: int,
+    episode_steps: int,
+) -> None:
+    """Populate deterministic maintenance tasks through the native kernel.
+
+    Production/portfolio decisions deliberately remain in Python. The native
+    function only mirrors the mechanical maintenance rule and writes directly
+    into the reusable :class:`TaskBatch` buffers.
+    """
+
+    if _propose_maintenance_tasks is None:
+        raise RuntimeError(
+            "native maintenance tasks require the bertani._rust extension"
+        )
+    views = batch.observation_views
+    _propose_maintenance_tasks(
+        views.tiles,
+        views.global_features,
+        views.units,
+        views.private,
+        batch.active_units,
+        tasks.active,
+        tasks.kind,
+        tasks.target_x,
+        tasks.target_y,
+        tasks.item,
+        tasks.quantity,
+        tasks.priority,
+        tasks.deadline,
+        tasks.estimated_value,
+        tasks.required_item,
+        tasks.required_count,
+        tasks.exclusive,
+        tasks.work_role,
+        tasks.board_size,
+        tasks.tile_slots,
+        turns_per_day,
+        shed_capacity,
+        episode_steps,
+    )
 
 
 @dataclass(frozen=True, slots=True)
