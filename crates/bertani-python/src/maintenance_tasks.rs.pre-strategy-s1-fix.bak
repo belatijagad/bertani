@@ -424,16 +424,8 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     // around ages 10/12 and 14/16 rather than being fertilized every
                     // three days from planting.
                     let ongoing_production_today = tomato_production || strawberry_production;
-                    // The production rule retires an ongoing crop once its final
-                    // scheduled yield has been consumed. Do not let a late
-                    // maintenance proposal override that CLEAR_WEED task.
-                    let exhausted_ongoing = !harvestable
-                        && ((crop(ITEM_TOMATO) && crop_age >= 11)
-                            || (crop(ITEM_STRAWBERRY) && crop_age >= 16));
-                    let ongoing_needing_fertilizer = ongoing_production_today
-                        && !harvestable
-                        && !exhausted_ongoing
-                        && fertilizer_days < 1.0;
+                    let ongoing_needing_fertilizer =
+                        ongoing_production_today && fertilizer_days < 1.0;
                     if ongoing_needing_fertilizer {
                         needs_fertilizer_count += 1;
                         // WATER must happen first when both are outstanding.  Once the
