@@ -348,6 +348,20 @@ class TaskScheduler:
         # Lightweight profiling counters.
         self.full_solves = 0
         self.cache_hits = 0
+        self.cache_miss_reasons: dict[str, int] = {
+            "no_route": 0,
+            "day_changed": 0,
+            "unit_set_changed": 0,
+            "forced": 0,
+            "missing_worker_route": 0,
+            "new_exclusive": 0,
+            "required_item": 0,
+            "empty_deposit": 0,
+        }
+        self.force_replan_reasons: dict[str, int] = {
+            "fetch_item": 0,
+            "local_override": 0,
+        }
 
         # Reusable compact buffers for the opt-in native greedy scheduler.
         # Their unit axis is only the live prefix, never VecEnv's padded 231.
@@ -611,6 +625,12 @@ class TaskScheduler:
         self._route_cache_day.clear()
         self._route_cache_units.clear()
         self._force_replan.clear()
+
+    def _count_cache_miss(self, reason: str) -> None:
+        self.cache_miss_reasons[reason] = self.cache_miss_reasons.get(reason, 0) + 1
+
+    def _count_force_replan(self, reason: str) -> None:
+        self.force_replan_reasons[reason] = self.force_replan_reasons.get(reason, 0) + 1
 
     def _assign_seat(
         self,
@@ -1000,6 +1020,7 @@ class TaskScheduler:
             ]
             if np.any(assigned_kinds == int(TaskKind.FETCH_ITEM)):
                 self._force_replan.add(key)
+                self._count_force_replan("fetch_item")
 
         # The underfoot override may intentionally deviate from the route's
         # first planned task. Replan next turn instead of mutating the cached
@@ -1017,6 +1038,7 @@ class TaskScheduler:
             planned_task = route[0] if route else -1
             if assigned_task >= 0 and assigned_task != planned_task:
                 self._force_replan.add(key)
+                self._count_force_replan("local_override")
                 break
 
     def _serve_cached_routes(
@@ -1054,16 +1076,20 @@ class TaskScheduler:
         key = (environment, player)
         routes = self._route_cache.get(key)
         if routes is None:
+            self._count_cache_miss("no_route")
             return False
         if self._route_cache_day.get(key) != day:
+            self._count_cache_miss("day_changed")
             return False
 
         active_unit_tuple = tuple(int(worker) for worker in active_units)
         if self._route_cache_units.get(key) != active_unit_tuple:
+            self._count_cache_miss("unit_set_changed")
             return False
 
         if key in self._force_replan:
             self._force_replan.discard(key)
+            self._count_cache_miss("forced")
             return False
 
         active_mask = tasks.active[environment, player]
@@ -1075,6 +1101,7 @@ class TaskScheduler:
         for worker in active_unit_tuple:
             route = routes.get(worker)
             if route is None:
+                self._count_cache_miss("missing_worker_route")
                 return False
             if route:
                 route[:] = [
@@ -1095,6 +1122,7 @@ class TaskScheduler:
         ]
         for task_value in exclusive_active:
             if int(task_value) not in planned:
+                self._count_cache_miss("new_exclusive")
                 return False
 
         claimed: set[int] = set()
@@ -1127,6 +1155,7 @@ class TaskScheduler:
                     task,
                 ]
             ):
+                self._count_cache_miss("required_item")
                 return False
 
             # Deposit tasks require the worker to still be carrying something.
@@ -1146,6 +1175,7 @@ class TaskScheduler:
                 ].sum()
                 <= 0
             ):
+                self._count_cache_miss("empty_deposit")
                 return False
 
             assignments.task_index[
@@ -1278,6 +1308,7 @@ class TaskScheduler:
                         == int(TaskKind.FETCH_ITEM)
                     ):
                         self._force_replan.add(key)
+                        self._count_force_replan("fetch_item")
 
         before_local = assignments.task_index[
             environment,
@@ -1304,6 +1335,7 @@ class TaskScheduler:
         ]
         if np.any(before_local != after_local):
             self._force_replan.add(key)
+            self._count_force_replan("local_override")
 
         return True
 

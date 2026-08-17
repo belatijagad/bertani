@@ -180,6 +180,12 @@ def run_native_batch(
         "scheduler_cache_hits": (
             0 if scheduler_obj is None else int(scheduler_obj.cache_hits)
         ),
+        "scheduler_cache_miss_reasons": (
+            {} if scheduler_obj is None else dict(scheduler_obj.cache_miss_reasons)
+        ),
+        "scheduler_force_replan_reasons": (
+            {} if scheduler_obj is None else dict(scheduler_obj.force_replan_reasons)
+        ),
     }
     return batch.rewards.copy(), diagnostics
 
@@ -300,6 +306,21 @@ def main() -> None:
             "scheduler calls: "
             f"full_solves={sum(d['scheduler_full_solves'] for d in diagnostics)}, "
             f"cache_hits={sum(d['scheduler_cache_hits'] for d in diagnostics)}"
+        )
+        miss_totals: dict[str, int] = {}
+        force_totals: dict[str, int] = {}
+        for diagnostic in diagnostics:
+            for name, value in diagnostic["scheduler_cache_miss_reasons"].items():
+                miss_totals[name] = miss_totals.get(name, 0) + int(value)
+            for name, value in diagnostic["scheduler_force_replan_reasons"].items():
+                force_totals[name] = force_totals.get(name, 0) + int(value)
+        print(
+            "scheduler cache misses: "
+            + ", ".join(f"{name}={value}" for name, value in miss_totals.items())
+        )
+        print(
+            "scheduler forced replans: "
+            + ", ".join(f"{name}={value}" for name, value in force_totals.items())
         )
     output = args.json_output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
