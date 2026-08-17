@@ -196,7 +196,12 @@ class VectorRulePolicy:
             liquidate=np.zeros(shape, dtype=np.bool_),
         )
 
-    def act(self, batch: Batch, max_orders: int = 10) -> RuleActions:
+    def act(
+        self,
+        batch: Batch,
+        max_orders: int = 10,
+        seat_mask: NDArray[np.bool_] | None = None,
+    ) -> RuleActions:
         """Return legal local maintenance actions for an entire batch.
 
         Opening-only batches take a fast path around task generation. Outside
@@ -223,8 +228,14 @@ class VectorRulePolicy:
             self.last_assignments = None
             return actions
 
-        intent = self.plan(batch)
         features = self.extract_features(batch)
+        planner_from_features = getattr(
+            self.intent_planner, "from_features", None
+        )
+        if planner_from_features is not None:
+            intent = planner_from_features(batch, features)
+        else:
+            intent = self.plan(batch)
 
         tasks = self._task_buffers(batch)
         tasks.clear()
@@ -237,7 +248,12 @@ class VectorRulePolicy:
             if self.workforce_planner is not None
             else None
         )
-        assignments = self._task_scheduler.assign(batch, tasks, workforce)
+        assignments = self._task_scheduler.assign(
+            batch,
+            tasks,
+            workforce,
+            seat_mask=seat_mask,
+        )
         self._task_executor.execute(
             batch, tasks, assignments, actions.unit_actions
         )

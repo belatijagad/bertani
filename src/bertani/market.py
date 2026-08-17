@@ -80,18 +80,33 @@ class MarketPlanBatch:
         """Append an ordered market row to each selected seat's active prefix."""
 
         self._validate_mask(mask)
+        if not np.any(mask):
+            return
+
         counts = np.broadcast_to(count, mask.shape)
-        for environment, player in np.argwhere(mask):
-            slot = self.lengths[environment, player]
-            if slot >= self.max_orders:
-                self.overflow[environment, player] = True
-                continue
-            self.actions[environment, player, slot] = (
-                operation,
-                item,
-                counts[environment, player],
-            )
-            self.lengths[environment, player] += 1
+        environments, players = np.nonzero(mask)
+        slots = self.lengths[environments, players]
+        valid = slots < self.max_orders
+
+        if np.any(~valid):
+            self.overflow[
+                environments[~valid],
+                players[~valid],
+            ] = True
+
+        if not np.any(valid):
+            return
+
+        environments = environments[valid]
+        players = players[valid]
+        slots = slots[valid]
+        self.actions[environments, players, slots, 0] = int(operation)
+        self.actions[environments, players, slots, 1] = int(item)
+        self.actions[environments, players, slots, 2] = counts[
+            environments,
+            players,
+        ]
+        self.lengths[environments, players] += 1
 
     def _validate_mask(self, mask: NDArray[np.bool_]) -> None:
         if mask.shape != self.lengths.shape:

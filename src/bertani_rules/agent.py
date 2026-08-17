@@ -193,6 +193,20 @@ class IntentPlanner:
 
     def __call__(self, batch: Batch) -> StrategicIntent:
         features = extract_rule_features(batch, self.config)
+        return self.from_features(batch, features)
+
+    def from_features(
+        self,
+        batch: Batch,
+        features,
+    ) -> StrategicIntent:
+        """Plan from already-decoded rule features.
+
+        VectorRulePolicy uses this fast path so the same observation is not
+        decoded twice on every non-opening turn. Calling the planner directly
+        keeps the original behavior through ``__call__``.
+        """
+
         shape = features.step.shape
         total_days = (
             self.config.episode_steps + self.config.turns_per_day - 1
@@ -463,9 +477,15 @@ class TerritorialWorkforcePlanner:
         del intent
         active = batch.active_units
         shape = active.shape
+        active_slots = np.flatnonzero(np.any(active, axis=(0, 1)))
+        active_limit = int(active_slots[-1]) + 1 if active_slots.size else 0
+        active_prefix = active[..., :active_limit]
+
         role = np.full(shape, WorkRole.ANY, dtype=np.int16)
         zone = np.full(shape, WorkZone.ANY, dtype=np.int16)
-        unit_index = np.arange(shape[-1], dtype=np.int16)[None, None, :]
+        role_prefix = role[..., :active_limit]
+        zone_prefix = zone[..., :active_limit]
+        unit_index = np.arange(active_limit, dtype=np.int16)[None, None, :]
 
         tiles = batch.observation_views.tiles[:, :, 0]
         animals = np.rint(tiles[..., 6:9].sum(axis=(2, 3))).astype(np.int16)
@@ -476,14 +496,14 @@ class TerritorialWorkforcePlanner:
             0,
         ).astype(np.int16)
 
-        logistics = active & (unit_index == 0)
-        livestock = active & (unit_index >= 1) & (
+        logistics = active_prefix & (unit_index == 0)
+        livestock = active_prefix & (unit_index >= 1) & (
             unit_index <= livestock_workers[..., None]
         )
-        field = active & ~logistics & ~livestock
-        role[logistics] = WorkRole.LOGISTICS
-        role[livestock] = WorkRole.LIVESTOCK
-        role[field] = WorkRole.FIELD
+        field = active_prefix & ~logistics & ~livestock
+        role_prefix[logistics] = WorkRole.LOGISTICS
+        role_prefix[livestock] = WorkRole.LIVESTOCK
+        role_prefix[field] = WorkRole.FIELD
 
         farms = batch.observation_views.farms[:, :, 0]
         unlocked = np.rint(farms[..., 4:8]).astype(np.bool_)
@@ -520,7 +540,7 @@ class TerritorialWorkforcePlanner:
 
         demand = np.where(unlocked, demand, 0.0)
 
-        territory_workers = active & ~logistics
+        territory_workers = active_prefix & ~logistics
         total_demand = demand.sum(axis=-1)
         fallback = unlocked.astype(np.float32)
         effective_demand = np.where(
@@ -545,34 +565,44 @@ class TerritorialWorkforcePlanner:
         # Assign each newly hired worker to the quadrant with the highest
         # remaining demand per assigned worker. Keep that territory for the
         # rest of the day so a changing task list cannot make routes thrash.
+        #
+        # Only the live unit prefix participates here. The native observation
+        # buffer reserves 231 slots, but the policy normally uses around a
+        # dozen workers; iterating every padded slot dominated this planner.
+        daily_zone_prefix = self._daily_zone[..., :active_limit]
         assigned_count = np.stack(
             [
-                ((self._daily_zone == quadrant) & territory_workers).sum(
+                ((daily_zone_prefix == quadrant) & territory_workers).sum(
                     axis=-1
                 )
                 for quadrant in range(4)
             ],
             axis=-1,
         ).astype(np.float32)
-        for worker in range(1, shape[-1]):
+        for worker_raw in active_slots:
+            worker = int(worker_raw)
+            if worker == 0:
+                continue
             needs_zone = territory_workers[..., worker] & (
-                self._daily_zone[..., worker] == WorkZone.ANY
+                daily_zone_prefix[..., worker] == WorkZone.ANY
             )
+            if not np.any(needs_zone):
+                continue
             pressure = effective_demand / (assigned_count + 1.0)
             chosen = np.argmax(pressure, axis=-1).astype(np.int16)
-            self._daily_zone[..., worker] = np.where(
-                needs_zone, chosen, self._daily_zone[..., worker]
+            daily_zone_prefix[..., worker] = np.where(
+                needs_zone, chosen, daily_zone_prefix[..., worker]
             )
             for quadrant in range(4):
                 assigned_count[..., quadrant] += needs_zone & (
                     chosen == quadrant
                 )
-        zone[territory_workers] = self._daily_zone[territory_workers]
+        zone_prefix[territory_workers] = daily_zone_prefix[territory_workers]
 
         # Inventory state overrides the default daily role. A worker already
         # carrying an animal should finish pasture placement; any other loaded
         # worker should complete the short shed route before returning afield.
-        units = batch.observation_views.units[:, :, 0]
+        units = batch.observation_views.units[:, :, 0, :active_limit]
         inventories = np.rint(
             units[..., 5:17] * self.shed_capacity
         ).astype(np.int64)
@@ -580,13 +610,13 @@ class TerritorialWorkforcePlanner:
             axis=-1
         ) > 0
         carrying_anything = inventories.sum(axis=-1) > 0
-        role[active & carrying_anything] = WorkRole.LOGISTICS
-        role[active & carrying_animal] = WorkRole.LIVESTOCK
+        role_prefix[active_prefix & carrying_anything] = WorkRole.LOGISTICS
+        role_prefix[active_prefix & carrying_animal] = WorkRole.LIVESTOCK
 
         plant_backlog = (
             tasks.active & (tasks.kind == TaskKind.PLANT)
         ).sum(axis=-1)
-        active_count = active.sum(axis=-1)
+        active_count = active_prefix.sum(axis=-1)
         reserved_by_kind = np.zeros(
             (*shape[:2], max(TaskKind) + 1), dtype=np.int16
         )
@@ -848,6 +878,9 @@ class ProductionTaskRule:
         self.episode_days = max(
             1, (episode_steps + turns_per_day - 1) // turns_per_day
         )
+        self._geometry_board_size: int | None = None
+        self._center_distance: NDArray[np.int64] | None = None
+        self._pasture_rank: NDArray[np.int16] | None = None
 
     def propose(
         self,
@@ -905,19 +938,10 @@ class ProductionTaskRule:
         ).astype(np.int64)
         target_pastures = intent.target_animal_counts[..., 1:].sum(axis=-1)
         missing_pastures = np.maximum(0, target_pastures - pasture_count)
-        y, x = np.indices(tiles.shape[-3:-1])
-        half = tasks.board_size // 2
+        half, center_distance, pasture_rank = self._geometry(tasks.board_size)
         # The leader uses a stable center-out pasture template rather than
         # choosing whichever nearby tile happens to be empty. Fixed slots keep
         # animal routes compact and make every expansion deterministic.
-        low_center = max(0, half - 1)
-        distance_x = np.minimum(np.abs(x - low_center), np.abs(x - half))
-        distance_y = np.minimum(np.abs(y - low_center), np.abs(y - half))
-        center_distance = distance_x + distance_y
-        pasture_rank = np.full((tasks.board_size, tasks.board_size), -1, dtype=np.int16)
-        for rank, (slot_x, slot_y) in enumerate(PASTURE_SLOTS):
-            if slot_x < tasks.board_size and slot_y < tasks.board_size:
-                pasture_rank[slot_y, slot_x] = rank
         desired_pastures = (
             (pasture_rank >= 0)[None, None]
             & (pasture_rank[None, None] < target_pastures[..., None, None])
@@ -1143,6 +1167,35 @@ class ProductionTaskRule:
             work_role=WorkRole.LOGISTICS,
         )
 
+    def _geometry(
+        self,
+        board_size: int,
+    ) -> tuple[int, NDArray[np.int64], NDArray[np.int16]]:
+        """Cache board-static routing geometry instead of rebuilding it each turn."""
+
+        if self._geometry_board_size != board_size:
+            y, x = np.indices((board_size, board_size))
+            half = board_size // 2
+            low_center = max(0, half - 1)
+            distance_x = np.minimum(np.abs(x - low_center), np.abs(x - half))
+            distance_y = np.minimum(np.abs(y - low_center), np.abs(y - half))
+            self._center_distance = distance_x + distance_y
+
+            pasture_rank = np.full(
+                (board_size, board_size),
+                -1,
+                dtype=np.int16,
+            )
+            for rank, (slot_x, slot_y) in enumerate(PASTURE_SLOTS):
+                if slot_x < board_size and slot_y < board_size:
+                    pasture_rank[slot_y, slot_x] = rank
+            self._pasture_rank = pasture_rank
+            self._geometry_board_size = board_size
+
+        assert self._center_distance is not None
+        assert self._pasture_rank is not None
+        return board_size // 2, self._center_distance, self._pasture_rank
+
     @staticmethod
     def _select_limited(
         candidates: np.ndarray,
@@ -1162,60 +1215,109 @@ class ProductionTaskRule:
         distance: np.ndarray,
         existing: np.ndarray,
     ) -> np.ndarray:
-        """Select center-out tiles while balancing unlocked quadrants."""
+        """Select center-out tiles while balancing unlocked quadrants.
+
+        This is exactly equivalent to the original list-scanning selector, but
+        keeps four pre-sorted quadrant queues. Each choice then considers at
+        most four queue heads instead of rescanning and removing from a Python
+        list of every remaining tile.
+        """
 
         selected = np.zeros_like(candidates)
         flat_distance = distance.reshape(-1)
         board_size = candidates.shape[-1]
         half = board_size // 2
+
         y, x = np.indices((board_size, board_size))
-        # NW, NE, SW, SE. Quadrant counts are updated after every selection so
-        # an equal-radius ring is distributed rather than filled row-major.
-        quadrant = ((y >= half).astype(np.int8) * 2 + (x >= half)).reshape(-1)
+        flat_y = y.reshape(-1)
+        flat_x = x.reshape(-1)
+        quadrant = (
+            (flat_y >= half).astype(np.int8) * 2
+            + (flat_x >= half).astype(np.int8)
+        )
+        tie_y = np.minimum(
+            np.abs(flat_y - (half - 1)),
+            np.abs(flat_y - half),
+        )
+        tie_x = np.minimum(
+            np.abs(flat_x - (half - 1)),
+            np.abs(flat_x - half),
+        )
+        flat_index = np.arange(flat_distance.size, dtype=np.int64)
+
+        # Primary key: distance. Tie-breaks reproduce the old chosen=min(...)
+        # order exactly.
+        base_order = np.lexsort(
+            (flat_index, tie_x, tie_y, flat_distance)
+        )
+        quadrant_orders = tuple(
+            base_order[quadrant[base_order] == quadrant_id]
+            for quadrant_id in range(4)
+        )
+
         for environment, player in np.argwhere(counts > 0):
-            indices = np.flatnonzero(candidates[environment, player].reshape(-1))
-            if not indices.size:
+            environment = int(environment)
+            player = int(player)
+            candidate_mask = candidates[environment, player].reshape(-1)
+            if not np.any(candidate_mask):
                 continue
-            occupied = np.flatnonzero(existing[environment, player].reshape(-1))
+
+            occupied = np.flatnonzero(
+                existing[environment, player].reshape(-1)
+            )
             quadrant_counts = np.bincount(
-                quadrant[occupied], minlength=4
+                quadrant[occupied],
+                minlength=4,
             ).astype(np.int64)
-            available = indices.tolist()
+
+            queues = tuple(
+                order[candidate_mask[order]]
+                for order in quadrant_orders
+            )
+            pointers = [0, 0, 0, 0]
+            available_count = sum(queue.size for queue in queues)
             output = selected[environment, player].reshape(-1)
-            for _ in range(min(int(counts[environment, player]), indices.size)):
-                nearest = min(flat_distance[index] for index in available)
-                ring = [
-                    index
-                    for index in available
-                    if flat_distance[index] == nearest
-                ]
-                least_occupied = min(quadrant_counts[quadrant[index]] for index in ring)
-                balanced = [
-                    index
-                    for index in ring
-                    if quadrant_counts[quadrant[index]] == least_occupied
-                ]
-                # On the same Manhattan ring, stay near the horizontal center
-                # band before extending toward the top/bottom edge. The old
-                # raw-index tie break selected y=0 first and made crops look
-                # top-heavy even though their radial distance was identical.
-                chosen = min(
+
+            for _ in range(
+                min(int(counts[environment, player]), available_count)
+            ):
+                nearest: int | np.integer | None = None
+                heads: list[tuple[int, int]] = []
+
+                for quadrant_id, queue in enumerate(queues):
+                    pointer = pointers[quadrant_id]
+                    if pointer >= queue.size:
+                        continue
+                    index = int(queue[pointer])
+                    candidate_distance = flat_distance[index]
+                    if nearest is None or candidate_distance < nearest:
+                        nearest = candidate_distance
+                        heads = [(quadrant_id, index)]
+                    elif candidate_distance == nearest:
+                        heads.append((quadrant_id, index))
+
+                least_occupied = min(
+                    quadrant_counts[quadrant_id]
+                    for quadrant_id, _ in heads
+                )
+                balanced = (
+                    (quadrant_id, index)
+                    for quadrant_id, index in heads
+                    if quadrant_counts[quadrant_id] == least_occupied
+                )
+                chosen_quadrant, chosen = min(
                     balanced,
-                    key=lambda index: (
-                        min(
-                            abs(index // board_size - (half - 1)),
-                            abs(index // board_size - half),
-                        ),
-                        min(
-                            abs(index % board_size - (half - 1)),
-                            abs(index % board_size - half),
-                        ),
-                        index,
+                    key=lambda candidate: (
+                        tie_y[candidate[1]],
+                        tie_x[candidate[1]],
+                        candidate[1],
                     ),
                 )
+
                 output[chosen] = True
-                quadrant_counts[quadrant[chosen]] += 1
-                available.remove(chosen)
+                quadrant_counts[chosen_quadrant] += 1
+                pointers[chosen_quadrant] += 1
+
         return selected
 
 class EconomyMarketRule:

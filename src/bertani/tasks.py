@@ -20,6 +20,19 @@ if TYPE_CHECKING:
     from .rule_based import StrategicIntent
 
 
+def _active_unit_limit(active_units: NDArray[np.bool_]) -> int:
+    """Return the smallest prefix containing every active unit slot.
+
+    The vector environment reserves 231 unit slots under the default
+    configuration, while normal rule-policy games use only a small prefix.
+    Restricting temporary decoding/execution arrays to that live prefix avoids
+    doing the same NumPy work over hundreds of guaranteed-inactive slots.
+    """
+
+    active_slots = np.flatnonzero(np.any(active_units, axis=(0, 1)))
+    return int(active_slots[-1]) + 1 if active_slots.size else 0
+
+
 class TaskKind(IntEnum):
     """Stable objectives proposed by rules and fulfilled by the executor."""
 
@@ -317,6 +330,7 @@ class TaskScheduler:
         batch: Batch,
         tasks: TaskBatch,
         workforce: WorkforcePlan | None = None,
+        seat_mask: NDArray[np.bool_] | None = None,
     ) -> TaskAssignments:
         n, players, unit_count = batch.active_units.shape
         shape = (n, players, unit_count)
@@ -349,13 +363,23 @@ class TaskScheduler:
         self._previous_task[new_day] = -1
         self._previous_task[~batch.active_units] = -1
 
-        units = views.units[:, :, 0]
+        active_limit = _active_unit_limit(batch.active_units)
+        units = views.units[:, :, 0, :active_limit]
         scale = max(1, self.board_size - 1)
         unit_x = np.rint(units[..., 2] * scale).astype(np.int16)
         unit_y = np.rint(units[..., 3] * scale).astype(np.int16)
         inventories = np.rint(
             units[..., 5:17] * self.shed_capacity
         ).astype(np.int64)
+
+        if seat_mask is None:
+            controlled_seats = np.ones((n, players), dtype=np.bool_)
+        else:
+            if seat_mask.shape != (n, players):
+                raise ValueError(
+                    f"seat mask must have shape {(n, players)}"
+                )
+            controlled_seats = np.asarray(seat_mask, dtype=np.bool_)
 
         if workforce is None:
             unit_role = np.full(shape, WorkRole.ANY, dtype=np.int16)
@@ -397,26 +421,25 @@ class TaskScheduler:
             + (tasks.target_x >= half).astype(np.int16)
         )
 
-        for environment in range(n):
-            for player in range(players):
-                self._assign_seat(
-                    environment=environment,
-                    player=player,
-                    batch=batch,
-                    tasks=tasks,
-                    assignments=assignments,
-                    unit_x=unit_x,
-                    unit_y=unit_y,
-                    inventories=inventories,
-                    unit_role=unit_role,
-                    unit_zone=unit_zone,
-                    task_zone=task_zone,
-                    role_bonus=role_bonus,
-                    zone_bonus=zone_bonus,
-                    reserved_by_kind=reserved_by_kind,
-                    hour=int(hour[environment, player]),
-                    day=int(day[environment, player]),
-                )
+        for environment, player in np.argwhere(controlled_seats):
+            self._assign_seat(
+                environment=int(environment),
+                player=int(player),
+                batch=batch,
+                tasks=tasks,
+                assignments=assignments,
+                unit_x=unit_x,
+                unit_y=unit_y,
+                inventories=inventories,
+                unit_role=unit_role,
+                unit_zone=unit_zone,
+                task_zone=task_zone,
+                role_bonus=role_bonus,
+                zone_bonus=zone_bonus,
+                reserved_by_kind=reserved_by_kind,
+                hour=int(hour[environment, player]),
+                day=int(day[environment, player]),
+            )
 
         self._previous_task[...] = assignments.task_index
         self._previous_task[~batch.active_units] = -1
@@ -1649,12 +1672,17 @@ class TaskExecutor:
         unit_actions: NDArray[np.int64],
     ) -> None:
         unit_actions.fill(0)
-        units = batch.observation_views.units[:, :, 0]
+        active_limit = _active_unit_limit(batch.active_units)
+        if active_limit == 0:
+            return
+
+        units = batch.observation_views.units[:, :, 0, :active_limit]
         scale = max(1, self.board_size - 1)
         unit_x = np.rint(units[..., 2] * scale).astype(np.int16)
         unit_y = np.rint(units[..., 3] * scale).astype(np.int16)
-        assigned = assignments.task_index >= 0
-        safe_task = np.maximum(assignments.task_index, 0)
+        task_index = assignments.task_index[..., :active_limit]
+        assigned = task_index >= 0
+        safe_task = np.maximum(task_index, 0)
 
         def task_field(values: NDArray) -> NDArray:
             return np.take_along_axis(values, safe_task, axis=2)
@@ -1712,10 +1740,11 @@ class TaskExecutor:
         ]
         legal &= ~needs_argument | ((item >= 0) & argument_legal)
 
-        unit_actions[..., 0][legal] = operation[legal]
+        active_actions = unit_actions[..., :active_limit, :]
+        active_actions[..., 0][legal] = operation[legal]
         write_arguments = legal & interaction
-        unit_actions[..., 1][write_arguments] = safe_item[write_arguments]
-        unit_actions[..., 2][write_arguments] = count[write_arguments]
+        active_actions[..., 1][write_arguments] = safe_item[write_arguments]
+        active_actions[..., 2][write_arguments] = count[write_arguments]
 
     @staticmethod
     def _movement(x: int, y: int, target_x: int, target_y: int) -> UnitOp:

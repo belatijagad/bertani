@@ -18,7 +18,6 @@ from bertani import VecEnv
 from bertani.v16_native import NativeV16Policy, load_v16_actions
 from bertani_rules.agent import build_policy
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = ROOT / "baselines" / "v16_rc5" / "main.py"
 DEFAULT_OUTPUT = ROOT / "outputs" / "rule-v16-native.json"
@@ -91,7 +90,6 @@ def run_native_batch(
     seeds: list[int], baseline: str, weed_spawn_chance: float
 ) -> np.ndarray:
     """Run one independent seed chunk and return paired terminal rewards."""
-
     paired_seeds = np.repeat(np.asarray(seeds, dtype=np.uint64), 2)
     environment = VecEnv(
         len(paired_seeds),
@@ -109,8 +107,21 @@ def run_native_batch(
     games = np.arange(len(paired_seeds), dtype=np.int64)
     rule_seats = games % 2
     v16_seats = 1 - rule_seats
+
+    # The rule policy used to solve routes for both seats even though the pit
+    # immediately discarded one of them. Keep a stable mask for the whole
+    # episode and ask the scheduler to solve only the seat actually controlled
+    # by the rule agent. This cannot change the game trajectory because the
+    # discarded rule-seat outputs were never submitted to VecEnv.
+    rule_seat_mask = np.zeros((len(paired_seeds), 2), dtype=np.bool_)
+    rule_seat_mask[games, rule_seats] = True
+
     for _ in range(719):
-        rule_actions = rule.act(batch, max_orders=environment.max_orders)
+        rule_actions = rule.act(
+            batch,
+            max_orders=environment.max_orders,
+            seat_mask=rule_seat_mask,
+        )
         v16_actions = v16.act(batch)
         unit_actions[games, rule_seats] = rule_actions.unit_actions[
             games, rule_seats
@@ -160,12 +171,10 @@ def main() -> None:
     parser.add_argument("--json-output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--weed-spawn-chance", type=float, default=0.005)
     args = parser.parse_args()
-
     # Each process owns a native vector environment. Let process-level batches
     # provide the parallelism by default instead of creating a Rayon pool in
     # every worker and oversubscribing the same CPU cores.
     os.environ["RAYON_NUM_THREADS"] = str(args.rust_threads)
-
     seeds = args.seeds or generated_seeds(args.num_seeds, args.seed_source)
     workers = min(args.workers, len(seeds))
     chunks = [
@@ -213,3 +222,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
