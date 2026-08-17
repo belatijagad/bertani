@@ -13,9 +13,7 @@
     clippy::cast_sign_loss
 )]
 
-use numpy::{
-    PyArray2, PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
-};
+use numpy::{PyArray2, PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -171,7 +169,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     episode_steps: i64,
 ) -> PyResult<()> {
     if board_size == 0 || turns_per_day <= 0 || shed_capacity <= 0 || episode_steps <= 0 {
-        return Err(PyValueError::new_err("maintenance configuration must be positive"));
+        return Err(PyValueError::new_err(
+            "maintenance configuration must be positive",
+        ));
     }
     if tile_slots != board_size.saturating_mul(board_size) {
         return Err(PyValueError::new_err("tile_slots must equal board_size**2"));
@@ -193,7 +193,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
 
     let global_shape = global_features.shape();
     if global_shape.len() != 3 || global_shape[0] != num_envs || global_shape[1] != players {
-        return Err(PyValueError::new_err("global_features batch shape does not match tiles"));
+        return Err(PyValueError::new_err(
+            "global_features batch shape does not match tiles",
+        ));
     }
     let unit_shape = units.shape();
     if unit_shape.len() != 5
@@ -202,11 +204,15 @@ pub(crate) fn propose_maintenance_tasks<'py>(
         || unit_shape[2] < 1
         || unit_shape[4] < UNIT_INVENTORY_START + ITEM_COUNT
     {
-        return Err(PyValueError::new_err("units shape is incompatible with maintenance tasks"));
+        return Err(PyValueError::new_err(
+            "units shape is incompatible with maintenance tasks",
+        ));
     }
     let max_units = unit_shape[3];
     if active_units.shape() != [num_envs, players, max_units] {
-        return Err(PyValueError::new_err("active_units shape does not match units"));
+        return Err(PyValueError::new_err(
+            "active_units shape does not match units",
+        ));
     }
     if seat_mask.shape() != [num_envs, players] {
         return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
@@ -217,12 +223,16 @@ pub(crate) fn propose_maintenance_tasks<'py>(
         || private_shape[1] != players
         || private_shape[2] < ITEM_COUNT
     {
-        return Err(PyValueError::new_err("private shape is incompatible with maintenance tasks"));
+        return Err(PyValueError::new_err(
+            "private shape is incompatible with maintenance tasks",
+        ));
     }
 
     let output_shape = task_active.shape();
     if output_shape.len() != 3 || output_shape[0] != num_envs || output_shape[1] != players {
-        return Err(PyValueError::new_err("task batch shape does not match observations"));
+        return Err(PyValueError::new_err(
+            "task batch shape does not match observations",
+        ));
     }
     let capacity = output_shape[2];
     if capacity <= tile_slots + 6 {
@@ -259,14 +269,19 @@ pub(crate) fn propose_maintenance_tasks<'py>(
         ("task_quantity", task_quantity.is_c_contiguous()),
         ("task_priority", task_priority.is_c_contiguous()),
         ("task_deadline", task_deadline.is_c_contiguous()),
-        ("task_estimated_value", task_estimated_value.is_c_contiguous()),
+        (
+            "task_estimated_value",
+            task_estimated_value.is_c_contiguous(),
+        ),
         ("task_required_item", task_required_item.is_c_contiguous()),
         ("task_required_count", task_required_count.is_c_contiguous()),
         ("task_exclusive", task_exclusive.is_c_contiguous()),
         ("task_work_role", task_work_role.is_c_contiguous()),
     ] {
         if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+            return Err(PyValueError::new_err(format!(
+                "{name} must be C-contiguous"
+            )));
         }
     }
 
@@ -342,8 +357,8 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     let tile = |channel: usize| tiles[[environment, player, 0, y, x, channel]];
 
                     let plants = tile(TILE_PLANT) > 0.5;
-                    let animals = (TILE_ANIMAL_START..TILE_ANIMAL_END)
-                        .any(|channel| tile(channel) > 0.5);
+                    let animals =
+                        (TILE_ANIMAL_START..TILE_ANIMAL_END).any(|channel| tile(channel) > 0.5);
                     let watered_or_fed = tile(TILE_WATERED_OR_FED) > 0.5;
                     let cared = tile(TILE_CARED) > 0.5;
                     let consecutive_missed = tile(TILE_CONSECUTIVE_MISSED) * 2.0;
@@ -400,9 +415,8 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                         || melon_bonus
                         || tomato_production
                         || strawberry_production;
-                    let needs_water = plants
-                        && !watered_or_fed
-                        && (consecutive_missed >= 1.0 || yield_water);
+                    let needs_water =
+                        plants && !watered_or_fed && (consecutive_missed >= 1.0 || yield_water);
 
                     let one_time_final_water =
                         one_time_ready && (wheat_bonus || carrot_bonus || melon_bonus);
@@ -550,8 +564,7 @@ pub(crate) fn propose_maintenance_tasks<'py>(
             let wheat_remainder = total_wheat_fetch % 2;
             let feed_fetch_priority = maximum_feed_priority + 1.0;
             for (index, extra_slot) in [0_usize, 3_usize].into_iter().enumerate() {
-                let quantity = wheat_quotient
-                    + i64::from(index == 0 && wheat_remainder == 1);
+                let quantity = wheat_quotient + i64::from(index == 0 && wheat_remainder == 1);
                 set_global(
                     &mut out,
                     seat_base + tile_slots + extra_slot,
