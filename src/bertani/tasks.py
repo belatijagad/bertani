@@ -510,6 +510,10 @@ class TaskScheduler:
         return int(self._native.cache_hits)
 
     @property
+    def idle_worker_steals(self) -> int:
+        return int(self._native.idle_worker_steals)
+
+    @property
     def cache_miss_reasons(self) -> dict[str, int]:
         counts = self._native.cache_miss_counts()
         return {

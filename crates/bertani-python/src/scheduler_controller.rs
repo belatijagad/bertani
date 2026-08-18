@@ -40,6 +40,38 @@ const FORCE_FETCH_ITEM: usize = 0;
 const FORCE_LOCAL_OVERRIDE: usize = 1;
 const FORCE_COUNT: usize = 2;
 
+#[derive(Clone, Copy, Debug)]
+struct StealCandidate {
+    makespan: i32,
+    total_delta: i32,
+    preference_loss: f64,
+    idle_distance: i32,
+    idle_local: usize,
+    donor_local: usize,
+    donor_position: usize,
+    task: usize,
+}
+
+#[inline]
+fn steal_candidate_is_better(candidate: StealCandidate, best: StealCandidate) -> bool {
+    candidate
+        .makespan
+        .cmp(&best.makespan)
+        .then_with(|| candidate.total_delta.cmp(&best.total_delta))
+        .then_with(|| {
+            candidate
+                .preference_loss
+                .partial_cmp(&best.preference_loss)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| candidate.idle_distance.cmp(&best.idle_distance))
+        .then_with(|| candidate.idle_local.cmp(&best.idle_local))
+        .then_with(|| candidate.donor_local.cmp(&best.donor_local))
+        .then_with(|| candidate.donor_position.cmp(&best.donor_position))
+        .then_with(|| candidate.task.cmp(&best.task))
+        == std::cmp::Ordering::Less
+}
+
 #[derive(Clone, Debug)]
 struct SeatCache {
     day: i32,
@@ -60,6 +92,7 @@ pub(crate) struct NativeTaskScheduler {
     force_replan: Vec<bool>,
     full_solves: u64,
     cache_hits: u64,
+    idle_worker_steals: u64,
     cache_miss_counts: [u64; MISS_COUNT],
     force_replan_counts: [u64; FORCE_COUNT],
 }
@@ -89,6 +122,7 @@ impl NativeTaskScheduler {
             force_replan: Vec::new(),
             full_solves: 0,
             cache_hits: 0,
+            idle_worker_steals: 0,
             cache_miss_counts: [0; MISS_COUNT],
             force_replan_counts: [0; FORCE_COUNT],
         })
@@ -102,6 +136,11 @@ impl NativeTaskScheduler {
     #[getter]
     fn cache_hits(&self) -> u64 {
         self.cache_hits
+    }
+
+    #[getter]
+    fn idle_worker_steals(&self) -> u64 {
+        self.idle_worker_steals
     }
 
     fn cache_miss_counts(&self) -> Vec<u64> {
@@ -523,6 +562,7 @@ impl NativeTaskScheduler {
         if self.serve_cached(
             seat,
             day,
+            hour,
             &active_units,
             &active_tasks,
             task_active,
@@ -530,6 +570,7 @@ impl NativeTaskScheduler {
             task_target_x,
             task_target_y,
             task_priority,
+            task_deadline,
             task_required_item,
             task_required_count,
             task_exclusive,
@@ -595,12 +636,52 @@ impl NativeTaskScheduler {
                 .map_err(|_| PyValueError::new_err("turns_per_day exceeds i32"))?,
         )?;
 
+        // FULL_SOLVE_IDLE_REPAIR: the cache-hit path already repairs empty
+        // worker routes by stealing safe future work. Apply the same repair
+        // immediately after a fresh solve instead of waiting for a later cache
+        // hit. Store `routes` first so the existing repair implementation can
+        // operate on the exact same representation.
+        self.caches[seat] = Some(SeatCache {
+            day,
+            units: active_units.clone(),
+            routes,
+        });
+        let full_solve_steals = self.repair_idle_cached_routes(
+            seat,
+            hour,
+            &active_units,
+            task_kind,
+            task_target_x,
+            task_target_y,
+            task_deadline,
+            task_required_item,
+            task_required_count,
+            task_exclusive,
+            task_work_role,
+            unit_role,
+            unit_zone,
+            &task_zone,
+            &unit_x,
+            &unit_y,
+            &inventories,
+            role_bonus,
+            zone_bonus,
+        )?;
+        self.idle_worker_steals += full_solve_steals as u64;
+
+        let first_tasks = self.caches[seat]
+            .as_ref()
+            .expect("fresh full-solve cache exists")
+            .routes
+            .iter()
+            .map(|route| route.first().copied())
+            .collect::<Vec<_>>();
+
         let mut claimed = vec![false; task_count];
-        for (local, route) in routes.iter().enumerate() {
-            let Some(&task) = route.first() else {
+        for (local, &worker) in active_units.iter().enumerate() {
+            let Some(task) = first_tasks[local] else {
                 continue;
             };
-            let worker = active_units[local];
             out_task_index[unit_offset + worker] = task as i64;
             out_score[unit_offset + worker] = self.assignment_score(
                 unit_offset,
@@ -675,7 +756,7 @@ impl NativeTaskScheduler {
 
         for (local, &worker) in active_units.iter().enumerate() {
             let assigned = out_task_index[unit_offset + worker];
-            let planned = routes[local].first().map_or(-1, |&task| task as i64);
+            let planned = first_tasks[local].map_or(-1, |task| task as i64);
             if assigned >= 0 && assigned != planned {
                 self.force_replan[seat] = true;
                 self.force_replan_counts[FORCE_LOCAL_OVERRIDE] += 1;
@@ -683,14 +764,6 @@ impl NativeTaskScheduler {
             }
         }
 
-        // `routes` is no longer needed by this solve after local-override
-        // detection, so move it into the persistent cache instead of cloning
-        // every worker route on every full solve.
-        self.caches[seat] = Some(SeatCache {
-            day,
-            units: active_units.clone(),
-            routes,
-        });
         Ok(())
     }
 
@@ -699,6 +772,7 @@ impl NativeTaskScheduler {
         &mut self,
         seat: usize,
         day: i32,
+        hour: i32,
         active_units: &[usize],
         active_tasks: &[usize],
         task_active: &[bool],
@@ -706,6 +780,7 @@ impl NativeTaskScheduler {
         task_target_x: &[i16],
         task_target_y: &[i16],
         task_priority: &[f32],
+        task_deadline: &[i16],
         task_required_item: &[i16],
         task_required_count: &[i64],
         task_exclusive: &[bool],
@@ -763,6 +838,29 @@ impl NativeTaskScheduler {
                 return Ok(false);
             }
         }
+
+        let steals = self.repair_idle_cached_routes(
+            seat,
+            hour,
+            active_units,
+            task_kind,
+            task_target_x,
+            task_target_y,
+            task_deadline,
+            task_required_item,
+            task_required_count,
+            task_exclusive,
+            task_work_role,
+            unit_role,
+            unit_zone,
+            task_zone,
+            unit_x,
+            unit_y,
+            inventories,
+            role_bonus,
+            zone_bonus,
+        )?;
+        self.idle_worker_steals += steals as u64;
 
         let first_tasks = self.caches[seat]
             .as_ref()
@@ -877,6 +975,195 @@ impl NativeTaskScheduler {
             self.force_replan_counts[FORCE_LOCAL_OVERRIDE] += 1;
         }
         Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn repair_idle_cached_routes(
+        &mut self,
+        seat: usize,
+        hour: i32,
+        active_units: &[usize],
+        task_kind: &[i16],
+        task_target_x: &[i16],
+        task_target_y: &[i16],
+        task_deadline: &[i16],
+        task_required_item: &[i16],
+        task_required_count: &[i64],
+        task_exclusive: &[bool],
+        task_work_role: &[i16],
+        unit_role: &[i16],
+        unit_zone: &[i16],
+        task_zone: &[i16],
+        unit_x: &[i16],
+        unit_y: &[i16],
+        inventories: &[i64],
+        role_bonus: f64,
+        zone_bonus: f64,
+    ) -> PyResult<usize> {
+        let turns_per_day = i32::try_from(self.turns_per_day)
+            .map_err(|_| PyValueError::new_err("turns_per_day exceeds i32"))?;
+        let remaining_turns = turns_per_day - hour;
+        if remaining_turns <= 0 {
+            return Ok(0);
+        }
+
+        let mut steals = 0_usize;
+
+        loop {
+            let best = {
+                let cache = self.caches[seat]
+                    .as_ref()
+                    .expect("cache existence checked above");
+                let mut best: Option<StealCandidate> = None;
+
+                let route_lengths = cache
+                    .routes
+                    .iter()
+                    .enumerate()
+                    .map(|(local, route)| {
+                        let worker = active_units[local];
+                        cached_route_length(
+                            unit_x[worker],
+                            unit_y[worker],
+                            route,
+                            task_target_x,
+                            task_target_y,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                for (idle_local, idle_route) in cache.routes.iter().enumerate() {
+                    if !idle_route.is_empty() {
+                        continue;
+                    }
+                    let idle_worker = active_units[idle_local];
+
+                    for (donor_local, donor_route) in cache.routes.iter().enumerate() {
+                        // Never steal the donor's head. A route of length 1 has no
+                        // safely stealable future work.
+                        if donor_local == idle_local || donor_route.len() <= 1 {
+                            continue;
+                        }
+                        let donor_worker = active_units[donor_local];
+                        let donor_old_length = route_lengths[donor_local];
+                        let other_max = route_lengths
+                            .iter()
+                            .enumerate()
+                            .filter(|(local, _)| *local != idle_local && *local != donor_local)
+                            .map(|(_, &length)| length)
+                            .max()
+                            .unwrap_or(0);
+
+                        for position in 1..donor_route.len() {
+                            let task = donor_route[position];
+                            if !task_exclusive[task]
+                                || !eligible(
+                                    idle_worker,
+                                    task,
+                                    inventories,
+                                    task_required_item,
+                                    task_required_count,
+                                    task_kind,
+                                )?
+                            {
+                                continue;
+                            }
+
+                            let tx = task_target_x[task];
+                            let ty = task_target_y[task];
+                            let idle_distance = manhattan(
+                                unit_x[idle_worker],
+                                unit_y[idle_worker],
+                                tx,
+                                ty,
+                            );
+                            let idle_length = idle_distance + 1;
+
+                            // The stolen task becomes the idle worker's head.
+                            if idle_length > remaining_turns {
+                                continue;
+                            }
+                            let deadline = task_deadline[task];
+                            if deadline >= 0 && hour + idle_distance > i32::from(deadline) {
+                                continue;
+                            }
+
+                            let prev_task = donor_route[position - 1];
+                            let px = task_target_x[prev_task];
+                            let py = task_target_y[prev_task];
+                            let to_task = manhattan(px, py, tx, ty);
+                            let removal_savings = if position + 1 < donor_route.len() {
+                                let next_task = donor_route[position + 1];
+                                let nx = task_target_x[next_task];
+                                let ny = task_target_y[next_task];
+                                to_task + manhattan(tx, ty, nx, ny)
+                                    - manhattan(px, py, nx, ny)
+                                    + 1
+                            } else {
+                                to_task + 1
+                            };
+                            let donor_new_length = donor_old_length - removal_savings;
+                            let makespan = other_max.max(donor_new_length).max(idle_length);
+                            let total_delta = donor_new_length + idle_length - donor_old_length;
+
+                            let donor_preference = worker_task_preference(
+                                donor_worker,
+                                task,
+                                task_work_role,
+                                unit_role,
+                                unit_zone,
+                                task_zone,
+                                role_bonus,
+                                zone_bonus,
+                            );
+                            let idle_preference = worker_task_preference(
+                                idle_worker,
+                                task,
+                                task_work_role,
+                                unit_role,
+                                unit_zone,
+                                task_zone,
+                                role_bonus,
+                                zone_bonus,
+                            );
+
+                            let candidate = StealCandidate {
+                                makespan,
+                                total_delta,
+                                preference_loss: donor_preference - idle_preference,
+                                idle_distance,
+                                idle_local,
+                                donor_local,
+                                donor_position: position,
+                                task,
+                            };
+                            if best.is_none_or(|current| {
+                                steal_candidate_is_better(candidate, current)
+                            }) {
+                                best = Some(candidate);
+                            }
+                        }
+                    }
+                }
+
+                best
+            };
+
+            let Some(best) = best else {
+                break;
+            };
+
+            let cache = self.caches[seat]
+                .as_mut()
+                .expect("cache existence checked above");
+            let removed = cache.routes[best.donor_local].remove(best.donor_position);
+            debug_assert_eq!(removed, best.task);
+            debug_assert!(cache.routes[best.idle_local].is_empty());
+            cache.routes[best.idle_local].push(best.task);
+            steals += 1;
+        }
+
+        Ok(steals)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1052,6 +1339,54 @@ impl NativeTaskScheduler {
         }
         score
     }
+}
+
+#[inline]
+fn manhattan(x0: i16, y0: i16, x1: i16, y1: i16) -> i32 {
+    i32::from((x0 - x1).abs()) + i32::from((y0 - y1).abs())
+}
+
+fn cached_route_length(
+    start_x: i16,
+    start_y: i16,
+    route: &[usize],
+    task_target_x: &[i16],
+    task_target_y: &[i16],
+) -> i32 {
+    let mut x = start_x;
+    let mut y = start_y;
+    let mut length = 0_i32;
+    for &task in route {
+        let tx = task_target_x[task];
+        let ty = task_target_y[task];
+        length += manhattan(x, y, tx, ty) + 1;
+        x = tx;
+        y = ty;
+    }
+    length
+}
+
+#[allow(clippy::too_many_arguments)]
+fn worker_task_preference(
+    worker: usize,
+    task: usize,
+    task_work_role: &[i16],
+    unit_role: &[i16],
+    unit_zone: &[i16],
+    task_zone: &[i16],
+    role_bonus: f64,
+    zone_bonus: f64,
+) -> f64 {
+    let mut preference = 0.0_f64;
+    let worker_role = unit_role[worker];
+    if worker_role != ROLE_ANY && worker_role == task_work_role[task] {
+        preference += role_bonus;
+    }
+    let worker_zone = unit_zone[worker];
+    if worker_zone != ZONE_ANY && worker_zone == task_zone[task] {
+        preference += zone_bonus;
+    }
+    preference
 }
 
 #[inline]
