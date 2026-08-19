@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the current rule agent against V16 in one native Rust batch."""
+"""Benchmark the current rule or a Kaggle file agent against native V16."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from bertani import VecEnv
+from bertani.native_agent import NativeFileAgentPolicy, load_agent_file
 from bertani.v16_native import NativeV16Policy, load_v16_actions
 from bertani_rules.agent import build_policy
 
@@ -91,6 +92,7 @@ def run_native_batch(
     baseline: str,
     weed_spawn_chance: float,
     profile: bool = False,
+    agent_path: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Run one independent seed chunk and return rewards + diagnostics."""
     paired_seeds = np.repeat(np.asarray(seeds, dtype=np.uint64), 2)
@@ -100,7 +102,21 @@ def run_native_batch(
         weed_spawn_chance=weed_spawn_chance,
     )
     batch = environment.reset(paired_seeds)
-    rule = build_policy(profile=profile)
+    if agent_path is None:
+        candidate = build_policy(profile=profile)
+    else:
+        candidate = NativeFileAgentPolicy(
+            load_agent_file(Path(agent_path)),
+            configuration={
+                "episodeSteps": 720,
+                "turnsPerDay": 24,
+                "boardSize": 10,
+                "startingMoney": 3_000,
+                "shedCapacity": 100,
+                "maxMarketOrdersPerTurn": environment.max_orders,
+            },
+            max_orders=environment.max_orders,
+        )
     v16 = NativeV16Policy(
         load_v16_actions(Path(baseline)),
         max_orders=environment.max_orders,
@@ -120,22 +136,32 @@ def run_native_batch(
     for _ in range(719):
         if profile:
             started = time.perf_counter_ns()
-            rule_actions = rule.act(
-                batch,
-                max_orders=environment.max_orders,
-                seat_mask=rule_seat_mask,
-            )
+            if agent_path is None:
+                rule_actions = candidate.act(
+                    batch,
+                    max_orders=environment.max_orders,
+                    seat_mask=rule_seat_mask,
+                )
+            else:
+                rule_actions = candidate.act(
+                    environment, batch, seat_mask=rule_seat_mask
+                )
             rule_ns += time.perf_counter_ns() - started
 
             started = time.perf_counter_ns()
             v16_actions = v16.act(batch)
             v16_ns += time.perf_counter_ns() - started
         else:
-            rule_actions = rule.act(
-                batch,
-                max_orders=environment.max_orders,
-                seat_mask=rule_seat_mask,
-            )
+            if agent_path is None:
+                rule_actions = candidate.act(
+                    batch,
+                    max_orders=environment.max_orders,
+                    seat_mask=rule_seat_mask,
+                )
+            else:
+                rule_actions = candidate.act(
+                    environment, batch, seat_mask=rule_seat_mask
+                )
             v16_actions = v16.act(batch)
 
         unit_actions[games, rule_seats] = rule_actions.unit_actions[
@@ -167,12 +193,16 @@ def run_native_batch(
     if not batch.dones.all():
         raise RuntimeError("native benchmark did not reach terminal states")
 
-    scheduler_obj = rule._task_scheduler
+    scheduler_obj = (
+        candidate._task_scheduler if agent_path is None else None
+    )
     diagnostics: dict[str, Any] = {
         "rule_ns": rule_ns,
         "v16_ns": v16_ns,
         "env_ns": env_ns,
-        "rule_profile_ns": dict(rule.profile_ns),
+        "rule_profile_ns": (
+            dict(candidate.profile_ns) if agent_path is None else {}
+        ),
         "scheduler_full_solves": (
             0 if scheduler_obj is None else int(scheduler_obj.full_solves)
         ),
@@ -215,7 +245,15 @@ def main() -> None:
         help="print coarse policy/environment timing diagnostics",
     )
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
-    parser.add_argument("--json-output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--agent",
+        type=Path,
+        help=(
+            "submission-style Python agent to pit against native V16; "
+            "omit to use the current rule policy"
+        ),
+    )
+    parser.add_argument("--json-output", type=Path)
     parser.add_argument("--weed-spawn-chance", type=float, default=0.005)
     args = parser.parse_args()
     # Each process owns a native vector environment. Let process-level batches
@@ -237,6 +275,7 @@ def main() -> None:
                 str(args.baseline),
                 args.weed_spawn_chance,
                 args.profile,
+                None if args.agent is None else str(args.agent),
             )
         ]
     else:
@@ -248,6 +287,7 @@ def main() -> None:
                     str(args.baseline),
                     args.weed_spawn_chance,
                     args.profile,
+                    None if args.agent is None else str(args.agent),
                 )
                 for chunk in chunks
             ]
@@ -309,7 +349,12 @@ def main() -> None:
             "scheduler forced replans: "
             + ", ".join(f"{name}={value}" for name, value in force_totals.items())
         )
-    output = args.json_output.resolve()
+    if args.json_output is not None:
+        output = args.json_output.resolve()
+    elif args.agent is None:
+        output = DEFAULT_OUTPUT
+    else:
+        output = ROOT / "outputs" / f"{args.agent.stem}-v16-native.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n")
     print(f"wrote {output}")

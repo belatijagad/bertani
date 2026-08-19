@@ -105,6 +105,12 @@ uv run python scripts/pit_agents.py \
   --seeds 11 12 13
 ```
 
+Pit the current rule policy against the preserved RuleV3 replay ensemble with:
+
+```bash
+uv run python scripts/pit_rulev3.py --seeds 11 451781128 874717982
+```
+
 Use the parity-checked native V16 harness for high-throughput rule development:
 
 ```bash
@@ -113,6 +119,11 @@ uv run python scripts/pit_v16_native.py --num-seeds 100 --seed-source 2026
 
 # A named regression panel.
 uv run python scripts/pit_v16_native.py --seeds 11 451781128 874717982
+
+# Any submission-style Python agent can occupy the candidate seats too.
+uv run python scripts/pit_v16_native.py \
+  --agent references/rule/rulev3.py \
+  --seeds 11 451781128 874717982
 ```
 
 The native adapter reproduces V16's trace, weed recovery, and market
@@ -149,13 +160,15 @@ The preserved V16-RC5 baseline and its provenance are documented in
 Build the current rule-based policy as a portable Kaggle archive with:
 
 ```bash
+uv run maturin develop --release
 uv run python scripts/package_rule_agent.py
 ```
 
 This writes `dist/rule_based_submission.tar.gz` with `main.py` at the archive
 root. All concrete decisions live in `src/bertani_rules/agent.py`; reusable
 planning and execution abstractions remain under `src/bertani`. The bundled
-observation adapter uses NumPy but does not require the local Rust extension.
+observation adapter uses NumPy, and the archive includes the Linux x86-64
+ABI3 Rust extension built by the preceding `maturin` command.
 
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
 
