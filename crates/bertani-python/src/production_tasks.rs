@@ -20,7 +20,7 @@
 )]
 
 use numpy::{
-    PyArray2, PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
+    PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -46,6 +46,10 @@ const TASK_BUILD_PASTURE: i16 = 10;
 const TASK_PLACE_ANIMAL: i16 = 11;
 const TASK_FETCH_ITEM: i16 = 12;
 const TASK_DEPOSIT_INVENTORY: i16 = 13;
+// STAGE is an active routing-only NONE task. This preserves the
+// existing 0..13 task-kind ABI used by scheduler reservation arrays.
+const TASK_STAGE: i16 = TASK_NONE;
+const MARKET_BUY_SEED: i64 = 3;
 
 const ROLE_ANY: i16 = 0;
 const ROLE_LOGISTICS: i16 = 1;
@@ -328,6 +332,8 @@ pub(crate) fn propose_production_tasks<'py>(
     target_crop_counts: Bound<'py, PyArray3<i64>>,
     target_animal_counts: Bound<'py, PyArray3<i64>>,
     liquidate: Bound<'py, PyArray2<bool>>,
+    market_actions: Bound<'py, PyArray4<i64>>,
+    market_lengths: Bound<'py, PyArray2<i64>>,
     task_active: Bound<'py, PyArray3<bool>>,
     task_kind: Bound<'py, PyArray3<i16>>,
     task_target_x: Bound<'py, PyArray3<i16>>,
@@ -406,6 +412,23 @@ pub(crate) fn propose_production_tasks<'py>(
         return Err(PyValueError::new_err("liquidate must have shape [N, P]"));
     }
 
+    let market_shape = market_actions.shape();
+    if market_shape.len() != 4
+        || market_shape[0] != num_envs
+        || market_shape[1] != players
+        || market_shape[2] < 1
+        || market_shape[3] != 3
+    {
+        return Err(PyValueError::new_err(
+            "market_actions must have shape [N, P, O, 3]",
+        ));
+    }
+    let max_market_orders = market_shape[2];
+    if market_lengths.shape() != [num_envs, players] {
+        return Err(PyValueError::new_err(
+            "market_lengths must have shape [N, P]",
+        ));
+    }
     let output_shape = task_active.shape();
     if output_shape.len() != 3 || output_shape[0] != num_envs || output_shape[1] != players {
         return Err(PyValueError::new_err("task batch shape does not match observations"));
@@ -465,6 +488,8 @@ pub(crate) fn propose_production_tasks<'py>(
     let target_crop_guard = target_crop_counts.try_readonly()?;
     let target_animal_guard = target_animal_counts.try_readonly()?;
     let liquidate_guard = liquidate.try_readonly()?;
+    let market_actions_guard = market_actions.try_readonly()?;
+    let market_lengths_guard = market_lengths.try_readonly()?;
     let tiles = tiles_guard.as_array();
     let global_features = global_guard.as_array();
     let units = units_guard.as_array();
@@ -474,6 +499,8 @@ pub(crate) fn propose_production_tasks<'py>(
     let target_crop_counts = target_crop_guard.as_array();
     let target_animal_counts = target_animal_guard.as_array();
     let liquidate = liquidate_guard.as_array();
+    let market_actions = market_actions_guard.as_array();
+    let market_lengths = market_lengths_guard.as_array();
 
     let mut active_guard = task_active.try_readwrite()?;
     let mut kind_guard = task_kind.try_readwrite()?;
@@ -522,6 +549,32 @@ pub(crate) fn propose_production_tasks<'py>(
             let hour = step % i64::from(turns_per_day);
             let productive = !liquidate[[environment, player]];
             let seat_base = (environment * players + player) * capacity;
+            let requested_orders = market_lengths[[environment, player]];
+            let Ok(requested_orders) = usize::try_from(requested_orders) else {
+                return Err(PyValueError::new_err(
+                    "market length cannot be negative",
+                ));
+            };
+            if requested_orders > max_market_orders {
+                return Err(PyValueError::new_err(
+                    "market length is outside the market action capacity",
+                ));
+            }
+            let mut pending_seed_buys = [0_i64; CROP_COUNT];
+            for order in 0..requested_orders {
+                if market_actions[[environment, player, order, 0]] != MARKET_BUY_SEED {
+                    continue;
+                }
+                let item = market_actions[[environment, player, order, 1]];
+                let Ok(crop) = usize::try_from(item) else {
+                    continue;
+                };
+                if crop >= CROP_COUNT {
+                    continue;
+                }
+                pending_seed_buys[crop] +=
+                    market_actions[[environment, player, order, 2]].max(0);
+            }
 
             let mut empty_tile = vec![false; tile_slots];
             let mut weed = vec![false; tile_slots];
@@ -630,6 +683,7 @@ pub(crate) fn propose_production_tasks<'py>(
             }
 
             let safe_to_plant = hour < i64::from(turns_per_day - 2);
+            let safe_to_stage = hour < i64::from(turns_per_day - 3);
             let reserved_pasture_count = target_pastures.max(14);
             let mut empty = vec![false; tile_slots];
             for slot in 0..tile_slots {
@@ -661,6 +715,11 @@ pub(crate) fn propose_production_tasks<'py>(
                 ITEM_STRAWBERRY,
             ] {
                 let crop_index = crop as usize;
+                let plant_priority = if (7..=8).contains(&day) || (11..=13).contains(&day) {
+                    115.0
+                } else {
+                    97.0
+                };
                 let deficit = (target_crop_counts[[environment, player, crop_index]]
                     - crop_counts[crop_index])
                     .max(0);
@@ -693,11 +752,7 @@ pub(crate) fn propose_production_tasks<'py>(
                             &mut out,
                             seat_base + slot,
                             TASK_PLANT,
-                            if (7..=8).contains(&day) || (11..=13).contains(&day) {
-                                115.0
-                            } else {
-                                97.0
-                            },
+                            plant_priority,
                             crop,
                             -1,
                             0,
@@ -708,6 +763,55 @@ pub(crate) fn propose_production_tasks<'py>(
                 planned_seed_use[crop_index] += selected_count;
                 if crop != ITEM_WHEAT {
                     cash_slots -= selected_count;
+                }
+
+                // Purchases resolve after unit actions. A seed bought now is not
+                // legal PLANT inventory yet, but a field worker may pre-position.
+                // The next observation confirms whether this slot becomes PLANT.
+                let remaining_deficit = (deficit - selected_count).max(0);
+                let mut staged_available = if safe_to_stage {
+                    remaining_deficit.min(pending_seed_buys[crop_index])
+                } else {
+                    0
+                };
+                if crop != ITEM_WHEAT {
+                    staged_available = staged_available.min(cash_slots);
+                }
+                let stage_candidates = empty
+                    .iter()
+                    .zip(&claimed)
+                    .map(|(&is_empty, &is_claimed)| is_empty && !is_claimed)
+                    .collect::<Vec<_>>();
+                let stage_occupied = existing_production
+                    .iter()
+                    .zip(&claimed)
+                    .map(|(&existing, &is_claimed)| existing || is_claimed)
+                    .collect::<Vec<_>>();
+                let staged = select_limited_by_distance(
+                    &stage_candidates,
+                    staged_available,
+                    &geometry.center_distance,
+                    &stage_occupied,
+                    &geometry,
+                );
+                let staged_count = staged.iter().filter(|&&value| value).count() as i64;
+                for (slot, &is_staged) in staged.iter().enumerate() {
+                    if is_staged {
+                        claimed[slot] = true;
+                        propose_tile(
+                            &mut out,
+                            seat_base + slot,
+                            TASK_STAGE,
+                            plant_priority - 1.0,
+                            crop,
+                            -1,
+                            0,
+                            ROLE_FIELD,
+                        );
+                    }
+                }
+                if crop != ITEM_WHEAT {
+                    cash_slots -= staged_count;
                 }
             }
 

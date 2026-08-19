@@ -289,7 +289,11 @@ pub(crate) fn execute_assignments<'py>(
 
                 let action_offset = unit_index * 3;
                 actions[action_offset] = operation;
-                if interaction {
+                // Only operations with an argument may populate the action's
+                // arg/count fields.  Routing-only STAGE tasks intentionally
+                // map to PASS at their target while retaining task.item as
+                // metadata for the future PLANT task.
+                if interaction && needs_argument(operation) {
                     actions[action_offset + 1] = safe_item as i64;
                     actions[action_offset + 2] = count;
                 }

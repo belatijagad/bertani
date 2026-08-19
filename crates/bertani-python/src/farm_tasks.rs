@@ -6,7 +6,7 @@
 
 #![allow(clippy::all, clippy::pedantic)]
 
-use numpy::{PyArray2, PyArray3, PyArray5, PyArray6};
+use numpy::{PyArray2, PyArray3, PyArray4, PyArray5, PyArray6};
 use pyo3::prelude::*;
 
 use crate::maintenance_tasks::propose_maintenance_tasks;
@@ -24,6 +24,8 @@ pub(crate) fn propose_farm_tasks<'py>(
     target_crop_counts: Bound<'py, PyArray3<i64>>,
     target_animal_counts: Bound<'py, PyArray3<i64>>,
     liquidate: Bound<'py, PyArray2<bool>>,
+    market_actions: Bound<'py, PyArray4<i64>>,
+    market_lengths: Bound<'py, PyArray2<i64>>,
     task_active: Bound<'py, PyArray3<bool>>,
     task_kind: Bound<'py, PyArray3<i16>>,
     task_target_x: Bound<'py, PyArray3<i16>>,
@@ -80,6 +82,8 @@ pub(crate) fn propose_farm_tasks<'py>(
         target_crop_counts,
         target_animal_counts,
         liquidate,
+        market_actions,
+        market_lengths,
         task_active,
         task_kind,
         task_target_x,

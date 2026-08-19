@@ -494,6 +494,42 @@ class FarmTaskRule:
             episode_steps=self.episode_steps,
         )
 
+    def propose_with_market_plan(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        market_plan: MarketPlanBatch,
+    ) -> None:
+        propose_native_farm_tasks(
+            batch,
+            intent,
+            tasks,
+            market_plan=market_plan,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
+    def propose_with_market_plan_masked(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        market_plan: MarketPlanBatch,
+        seat_mask: NDArray[np.bool_],
+    ) -> None:
+        propose_native_farm_tasks(
+            batch,
+            intent,
+            tasks,
+            market_plan=market_plan,
+            seat_mask=seat_mask,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
     def propose_masked(
         self,
         batch: Batch,
@@ -572,6 +608,24 @@ class ProductionTaskRule:
             shed_capacity=self.shed_capacity,
             episode_steps=self.episode_steps,
         )
+
+    def propose_with_market_plan(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        market_plan: MarketPlanBatch,
+    ) -> None:
+        propose_native_production_tasks(
+            batch,
+            intent,
+            tasks,
+            market_plan=market_plan,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
 
 class EconomyMarketRule:
     """Fast native backend for the current hand-written market strategy."""

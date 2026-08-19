@@ -293,12 +293,38 @@ class VectorRulePolicy:
         if self.profile:
             self.profile_ns["intent"] += time.perf_counter_ns() - started
 
+        # Build the economic plan before routing so the tactical layer can use
+        # its purchases as next-turn staging hints. Unit actions still resolve
+        # before market orders, so current-turn tasks never consume them.
+        started = time.perf_counter_ns() if self.profile else 0
+        self._append_liquidation_sales(
+            features, intent, self.last_market_plan, seat_mask=seat_mask
+        )
+        for rule in self.market_rules:
+            masked_propose = getattr(rule, "propose_masked", None)
+            if seat_mask is not None and masked_propose is not None:
+                masked_propose(batch, intent, self.last_market_plan, seat_mask)
+            else:
+                rule.propose(batch, intent, self.last_market_plan)
+        if self.profile:
+            self.profile_ns["market"] += time.perf_counter_ns() - started
+
         tasks = self._task_buffers(batch)
         tasks.clear()
         for rule in self.task_rules:
             started = time.perf_counter_ns() if self.profile else 0
+            with_market_plan = getattr(rule, "propose_with_market_plan", None)
+            masked_with_market_plan = getattr(
+                rule, "propose_with_market_plan_masked", None
+            )
             masked_propose = getattr(rule, "propose_masked", None)
-            if seat_mask is not None and masked_propose is not None:
+            if seat_mask is not None and masked_with_market_plan is not None:
+                masked_with_market_plan(
+                    batch, intent, tasks, self.last_market_plan, seat_mask
+                )
+            elif with_market_plan is not None:
+                with_market_plan(batch, intent, tasks, self.last_market_plan)
+            elif seat_mask is not None and masked_propose is not None:
                 masked_propose(batch, intent, tasks, seat_mask)
             else:
                 rule.propose(batch, intent, tasks)
@@ -337,27 +363,18 @@ class VectorRulePolicy:
         self.last_tasks = tasks
         self.last_assignments = assignments
 
-        started = time.perf_counter_ns() if self.profile else 0
-        self._append_liquidation_sales(
-            features, intent, self.last_market_plan, seat_mask=seat_mask
-        )
-        for rule in self.market_rules:
-            masked_propose = getattr(rule, "propose_masked", None)
-            if seat_mask is not None and masked_propose is not None:
-                masked_propose(batch, intent, self.last_market_plan, seat_mask)
-            else:
-                rule.propose(batch, intent, self.last_market_plan)
         if self.opening_controller is not None:
+            started = time.perf_counter_ns() if self.profile else 0
             self.last_opening_diagnostics = self.opening_controller.apply(
                 batch,
                 actions.unit_actions,
                 actions.market_actions,
                 actions.market_lengths,
             )
+            if self.profile:
+                self.profile_ns["opening"] += time.perf_counter_ns() - started
         else:
             self.last_opening_diagnostics = None
-        if self.profile:
-            self.profile_ns["market"] += time.perf_counter_ns() - started
         return actions
 
     def _task_buffers(self, batch: Batch) -> TaskBatch:

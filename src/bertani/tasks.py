@@ -25,6 +25,7 @@ except (ImportError, ModuleNotFoundError):
 from .vec_env import Batch, Item, UnitOp
 
 if TYPE_CHECKING:
+    from .market import MarketPlanBatch
     from .rule_based import StrategicIntent
 
 
@@ -54,6 +55,27 @@ def _normalized_seat_mask(
     return np.ascontiguousarray(seat_mask, dtype=np.bool_)
 
 
+def _market_plan_arrays(
+    batch: Batch, market_plan: MarketPlanBatch | None
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """Return the ordered market plan used only as next-turn resource hints."""
+    shape = batch.active_units.shape[:2]
+    if market_plan is None:
+        return (
+            np.zeros((*shape, 1, 3), dtype=np.int64),
+            np.zeros(shape, dtype=np.int64),
+        )
+    if market_plan.actions.shape[:2] != shape or market_plan.actions.shape[-1] != 3:
+        raise ValueError("market plan actions do not match the batch")
+    if market_plan.lengths.shape != shape:
+        raise ValueError("market plan lengths do not match the batch")
+    if not market_plan.actions.flags.c_contiguous:
+        raise ValueError("market plan actions must be C-contiguous")
+    if not market_plan.lengths.flags.c_contiguous:
+        raise ValueError("market plan lengths must be C-contiguous")
+    return market_plan.actions, market_plan.lengths
+
+
 class TaskKind(IntEnum):
     """Stable objectives proposed by rules and fulfilled by the executor."""
 
@@ -71,6 +93,9 @@ class TaskKind(IntEnum):
     PLACE_ANIMAL = 11
     FETCH_ITEM = 12
     DEPOSIT_INVENTORY = 13
+    # Routing-only objective. active=True distinguishes STAGE from
+    # an unused NONE slot; keeping value 0 preserves the 14-kind ABI.
+    STAGE = NONE
 
 
 class WorkRole(IntEnum):
@@ -271,6 +296,7 @@ def propose_native_farm_tasks(
     intent: StrategicIntent,
     tasks: TaskBatch,
     *,
+    market_plan: MarketPlanBatch | None = None,
     seat_mask: NDArray[np.bool_] | None = None,
     turns_per_day: int,
     shed_capacity: int,
@@ -283,6 +309,7 @@ def propose_native_farm_tasks(
             "native farm tasks require the bertani._rust extension"
         )
     views = batch.observation_views
+    market_actions, market_lengths = _market_plan_arrays(batch, market_plan)
     _propose_farm_tasks(
         views.tiles,
         views.global_features,
@@ -293,6 +320,8 @@ def propose_native_farm_tasks(
         np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
         np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
         np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
+        market_actions,
+        market_lengths,
         tasks.active,
         tasks.kind,
         tasks.target_x,
@@ -369,6 +398,7 @@ def propose_native_production_tasks(
     intent: StrategicIntent,
     tasks: TaskBatch,
     *,
+    market_plan: MarketPlanBatch | None = None,
     seat_mask: NDArray[np.bool_] | None = None,
     turns_per_day: int,
     shed_capacity: int,
@@ -384,6 +414,7 @@ def propose_native_production_tasks(
             "native production tasks require the bertani._rust extension"
         )
     views = batch.observation_views
+    market_actions, market_lengths = _market_plan_arrays(batch, market_plan)
     _propose_production_tasks(
         views.tiles,
         views.global_features,
@@ -394,6 +425,8 @@ def propose_native_production_tasks(
         np.ascontiguousarray(intent.target_crop_counts, dtype=np.int64),
         np.ascontiguousarray(intent.target_animal_counts, dtype=np.int64),
         np.ascontiguousarray(intent.liquidate, dtype=np.bool_),
+        market_actions,
+        market_lengths,
         tasks.active,
         tasks.kind,
         tasks.target_x,
