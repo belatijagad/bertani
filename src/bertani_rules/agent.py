@@ -563,6 +563,42 @@ class MaintenanceTaskRule:
         self.shed_capacity = shed_capacity
         self.episode_steps = episode_steps
 
+    def propose_with_market_plan(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        market_plan: MarketPlanBatch,
+    ) -> None:
+        del intent
+        propose_native_maintenance_tasks(
+            batch,
+            tasks,
+            market_plan=market_plan,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
+    def propose_with_market_plan_masked(
+        self,
+        batch: Batch,
+        intent: StrategicIntent,
+        tasks: TaskBatch,
+        market_plan: MarketPlanBatch,
+        seat_mask: NDArray[np.bool_],
+    ) -> None:
+        del intent
+        propose_native_maintenance_tasks(
+            batch,
+            tasks,
+            market_plan=market_plan,
+            seat_mask=seat_mask,
+            turns_per_day=self.turns_per_day,
+            shed_capacity=self.shed_capacity,
+            episode_steps=self.episode_steps,
+        )
+
     def propose(
         self,
         batch: Batch,

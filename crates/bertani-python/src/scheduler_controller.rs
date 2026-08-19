@@ -128,6 +128,34 @@ impl NativeTaskScheduler {
         })
     }
 
+    /// Return the currently cached multi-task routes for one seat.
+    ///
+    /// Debug-only read path; normal scheduling never calls it.
+    fn debug_routes(
+        &self,
+        environment: usize,
+        player: usize,
+    ) -> PyResult<Vec<(usize, Vec<usize>)>> {
+        let Some((num_envs, players, _max_units)) = self.shape else {
+            return Ok(Vec::new());
+        };
+        if environment >= num_envs || player >= players {
+            return Err(PyValueError::new_err(
+                "debug route seat is outside the scheduler batch shape",
+            ));
+        }
+        let seat = environment * players + player;
+        let Some(cache) = self.caches.get(seat).and_then(Option::as_ref) else {
+            return Ok(Vec::new());
+        };
+        Ok(cache
+            .units
+            .iter()
+            .copied()
+            .zip(cache.routes.iter().cloned())
+            .collect())
+    }
+
     #[getter]
     fn full_solves(&self) -> u64 {
         self.full_solves

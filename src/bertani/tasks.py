@@ -347,6 +347,7 @@ def propose_native_maintenance_tasks(
     batch: Batch,
     tasks: TaskBatch,
     *,
+    market_plan: MarketPlanBatch | None = None,
     seat_mask: NDArray[np.bool_] | None = None,
     turns_per_day: int,
     shed_capacity: int,
@@ -364,6 +365,7 @@ def propose_native_maintenance_tasks(
             "native maintenance tasks require the bertani._rust extension"
         )
     views = batch.observation_views
+    market_actions, market_lengths = _market_plan_arrays(batch, market_plan)
     _propose_maintenance_tasks(
         views.tiles,
         views.global_features,
@@ -371,6 +373,8 @@ def propose_native_maintenance_tasks(
         views.private,
         batch.active_units,
         _normalized_seat_mask(batch, seat_mask),
+        market_actions,
+        market_lengths,
         tasks.active,
         tasks.kind,
         tasks.target_x,
@@ -533,6 +537,17 @@ class TaskScheduler:
         self._default_role: NDArray[np.int16] | None = None
         self._default_zone: NDArray[np.int16] | None = None
         self._default_reserved: NDArray[np.int16] | None = None
+
+    def debug_routes(
+        self,
+        environment: int = 0,
+        player: int = 0,
+    ) -> list[tuple[int, list[int]]]:
+        # Offline tracing/debugging only.
+        return [
+            (int(unit), [int(task) for task in route])
+            for unit, route in self._native.debug_routes(environment, player)
+        ]
 
     @property
     def full_solves(self) -> int:

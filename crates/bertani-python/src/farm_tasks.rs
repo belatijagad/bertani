@@ -52,6 +52,8 @@ pub(crate) fn propose_farm_tasks<'py>(
         private.clone(),
         active_units.clone(),
         seat_mask.clone(),
+        market_actions.clone(),
+        market_lengths.clone(),
         task_active.clone(),
         task_kind.clone(),
         task_target_x.clone(),

@@ -36,6 +36,7 @@ const ITEM_STRAWBERRY: i16 = 3;
 const ITEM_MELON: i16 = 4;
 const ITEM_MILK: usize = 6;
 const ITEM_WOOL: usize = 7;
+const ITEM_GOOSE: i16 = 9;
 const ITEM_COW: i16 = 10;
 const ITEM_SHEEP: i16 = 11;
 
@@ -50,6 +51,7 @@ const TASK_DEPOSIT_INVENTORY: i16 = 13;
 // existing 0..13 task-kind ABI used by scheduler reservation arrays.
 const TASK_STAGE: i16 = TASK_NONE;
 const MARKET_BUY_SEED: i64 = 3;
+const MARKET_BUY_ANIMAL: i64 = 5;
 
 const ROLE_ANY: i16 = 0;
 const ROLE_LOGISTICS: i16 = 1;
@@ -561,19 +563,31 @@ pub(crate) fn propose_production_tasks<'py>(
                 ));
             }
             let mut pending_seed_buys = [0_i64; CROP_COUNT];
+            let mut pending_animal_buys = [0_i64; ANIMAL_COUNT];
             for order in 0..requested_orders {
-                if market_actions[[environment, player, order, 0]] != MARKET_BUY_SEED {
-                    continue;
-                }
+                let operation = market_actions[[environment, player, order, 0]];
                 let item = market_actions[[environment, player, order, 1]];
-                let Ok(crop) = usize::try_from(item) else {
-                    continue;
-                };
-                if crop >= CROP_COUNT {
+                let quantity = market_actions[[environment, player, order, 2]].max(0);
+
+                if operation == MARKET_BUY_SEED {
+                    let Ok(crop) = usize::try_from(item) else {
+                        continue;
+                    };
+                    if crop < CROP_COUNT {
+                        pending_seed_buys[crop] += quantity;
+                    }
                     continue;
                 }
-                pending_seed_buys[crop] +=
-                    market_actions[[environment, player, order, 2]].max(0);
+
+                if operation == MARKET_BUY_ANIMAL {
+                    let animal = item - i64::from(ITEM_GOOSE);
+                    let Ok(animal) = usize::try_from(animal) else {
+                        continue;
+                    };
+                    if animal < ANIMAL_COUNT {
+                        pending_animal_buys[animal] += quantity;
+                    }
+                }
             }
 
             let mut empty_tile = vec![false; tile_slots];
@@ -934,30 +948,138 @@ pub(crate) fn propose_production_tasks<'py>(
             let sheep_deficit = (target_animal_counts[[environment, player, 2]]
                 - animal_counts[2])
                 .max(0);
+            // Fetch only animals that have somewhere to go.  This prevents a
+            // logistics worker from picking up a cow/sheep and carrying it around
+            // when every pasture is occupied or already claimed by a carried animal.
+            let unclaimed_empty_pastures = empty_pasture
+                .iter()
+                .zip(&claimed_pasture)
+                .map(|(&is_empty, &is_claimed)| is_empty && !is_claimed)
+                .collect::<Vec<_>>();
+            let placement_capacity = unclaimed_empty_pastures
+                .iter()
+                .filter(|&&available| available)
+                .count() as i64;
+
             let cow_needed = cow_deficit > 0;
             let sheep_needed = sheep_deficit > 0;
-            let fetch_cow = cow_needed && shed_cow > 0 && carried_cow == 0;
-            let fetch_sheep = !fetch_cow && sheep_needed && shed_sheep > 0 && carried_sheep == 0;
+            let fetch_cow = cow_needed
+                && shed_cow > 0
+                && carried_cow == 0
+                && placement_capacity > 0;
+            let fetch_sheep = !fetch_cow
+                && sheep_needed
+                && shed_sheep > 0
+                && carried_sheep == 0
+                && placement_capacity > 0;
             let fetch_animal = productive && (fetch_cow || fetch_sheep);
             let fetch_item = if fetch_cow { ITEM_COW } else { ITEM_SHEEP };
             let fetch_quantity = if fetch_cow {
-                shed_cow.min(cow_deficit)
+                shed_cow.min(cow_deficit).min(placement_capacity)
             } else {
-                shed_sheep.min(sheep_deficit)
+                shed_sheep.min(sheep_deficit).min(placement_capacity)
             };
-            set_global(
-                &mut out,
-                seat_base + tile_slots + 2,
-                fetch_animal,
-                TASK_FETCH_ITEM,
-                access,
-                access,
-                150.0,
-                fetch_item,
-                fetch_quantity,
-                true,
-                ROLE_LOGISTICS,
-            );
+
+            // A BUY_ANIMAL order resolves after unit actions.  If a required
+            // cow/sheep is being bought now, pre-position one logistics worker at
+            // the shed in the exact global slot that becomes FETCH_ITEM after the
+            // next observation confirms the purchase.
+            let pending_cow_need = (cow_deficit - carried_cow - shed_cow).max(0);
+            let pending_sheep_need = (sheep_deficit - carried_sheep - shed_sheep).max(0);
+            let stage_cow = !fetch_animal
+                && productive
+                && placement_capacity > 0
+                && carried_cow == 0
+                && shed_cow == 0
+                && pending_cow_need > 0
+                && pending_animal_buys[1] > 0;
+            let stage_sheep = !fetch_animal
+                && !stage_cow
+                && productive
+                && placement_capacity > 0
+                && carried_sheep == 0
+                && shed_sheep == 0
+                && pending_sheep_need > 0
+                && pending_animal_buys[2] > 0;
+
+            let stage_item = if stage_cow { ITEM_COW } else { ITEM_SHEEP };
+            let stage_quantity = if stage_cow {
+                pending_animal_buys[1]
+                    .min(pending_cow_need)
+                    .min(placement_capacity)
+            } else {
+                pending_animal_buys[2]
+                    .min(pending_sheep_need)
+                    .min(placement_capacity)
+            };
+
+            // The production task uses the NW shed-access tile `(access, access)`.
+            // Work backwards from PLACE@23:
+            //   STAGE@S -> purchase -> PICKUP@(S+1) -> d moves -> PLACE.
+            let nearest_place_distance = unclaimed_empty_pastures
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, &available)| {
+                    if !available {
+                        return None;
+                    }
+                    let x = slot % board_size;
+                    let y = slot / board_size;
+                    let access_usize = usize::try_from(access).ok()?;
+                    i64::try_from(x.abs_diff(access_usize) + y.abs_diff(access_usize)).ok()
+                })
+                .min()
+                .unwrap_or(i64::MAX);
+            let latest_stage_hour = i64::from(turns_per_day - 1)
+                .saturating_sub(nearest_place_distance)
+                .saturating_sub(2);
+            let stage_animal = (stage_cow || stage_sheep) && hour <= latest_stage_hour;
+
+            let animal_slot = seat_base + tile_slots + 2;
+            if fetch_animal {
+                set_global(
+                    &mut out,
+                    animal_slot,
+                    true,
+                    TASK_FETCH_ITEM,
+                    access,
+                    access,
+                    150.0,
+                    fetch_item,
+                    fetch_quantity,
+                    true,
+                    ROLE_LOGISTICS,
+                );
+            } else if stage_animal {
+                set_global(
+                    &mut out,
+                    animal_slot,
+                    true,
+                    TASK_STAGE,
+                    access,
+                    access,
+                    149.0,
+                    stage_item,
+                    stage_quantity,
+                    true,
+                    ROLE_LOGISTICS,
+                );
+                out.deadline[animal_slot] = i16::try_from(latest_stage_hour).unwrap_or(-1);
+            } else {
+                set_global(
+                    &mut out,
+                    animal_slot,
+                    false,
+                    TASK_NONE,
+                    access,
+                    access,
+                    0.0,
+                    -1,
+                    0,
+                    true,
+                    ROLE_LOGISTICS,
+                );
+            }
 
             let deposit_priority = if premium_carried {
                 if day == 6 { 145.0 } else { 112.0 }

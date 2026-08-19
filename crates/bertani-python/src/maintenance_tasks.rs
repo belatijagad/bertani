@@ -13,7 +13,7 @@
     clippy::cast_sign_loss
 )]
 
-use numpy::{PyArray2, PyArray3, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
+use numpy::{PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -33,6 +33,10 @@ const TASK_HARVEST: i16 = 4;
 const TASK_COLLECT_FERTILIZER: i16 = 5;
 const TASK_FERTILIZE: i16 = 8;
 const TASK_FETCH_ITEM: i16 = 12;
+
+// Routing-only stage: active task with NONE kind.
+const TASK_STAGE: i16 = TASK_NONE;
+const MARKET_BUY_PRODUCT: i64 = 4;
 
 const ROLE_ANY: i16 = 0;
 const ROLE_LOGISTICS: i16 = 1;
@@ -149,6 +153,8 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     private: Bound<'py, PyArray3<f32>>,
     active_units: Bound<'py, PyArray3<bool>>,
     seat_mask: Bound<'py, PyArray2<bool>>,
+    market_actions: Bound<'py, PyArray4<i64>>,
+    market_lengths: Bound<'py, PyArray2<i64>>,
     task_active: Bound<'py, PyArray3<bool>>,
     task_kind: Bound<'py, PyArray3<i16>>,
     task_target_x: Bound<'py, PyArray3<i16>>,
@@ -217,6 +223,23 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     if seat_mask.shape() != [num_envs, players] {
         return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
     }
+    let market_shape = market_actions.shape();
+    if market_shape.len() != 4
+        || market_shape[0] != num_envs
+        || market_shape[1] != players
+        || market_shape[2] < 1
+        || market_shape[3] != 3
+    {
+        return Err(PyValueError::new_err(
+            "market_actions must have shape [N, P, O, 3]",
+        ));
+    }
+    let max_market_orders = market_shape[2];
+    if market_lengths.shape() != [num_envs, players] {
+        return Err(PyValueError::new_err(
+            "market_lengths must have shape [N, P]",
+        ));
+    }
     let private_shape = private.shape();
     if private_shape.len() != 3
         || private_shape[0] != num_envs
@@ -261,6 +284,8 @@ pub(crate) fn propose_maintenance_tasks<'py>(
         }
     }
     for (name, contiguous) in [
+        ("market_actions", market_actions.is_c_contiguous()),
+        ("market_lengths", market_lengths.is_c_contiguous()),
         ("task_active", task_active.is_c_contiguous()),
         ("task_kind", task_kind.is_c_contiguous()),
         ("task_target_x", task_target_x.is_c_contiguous()),
@@ -291,12 +316,16 @@ pub(crate) fn propose_maintenance_tasks<'py>(
     let private_guard = private.try_readonly()?;
     let active_units_guard = active_units.try_readonly()?;
     let seat_mask_guard = seat_mask.try_readonly()?;
+    let market_actions_guard = market_actions.try_readonly()?;
+    let market_lengths_guard = market_lengths.try_readonly()?;
     let tiles = tiles_guard.as_array();
     let global_features = global_guard.as_array();
     let units = units_guard.as_array();
     let private = private_guard.as_array();
     let active_units = active_units_guard.as_array();
     let seat_mask = seat_mask_guard.as_array();
+    let market_actions = market_actions_guard.as_array();
+    let market_lengths = market_lengths_guard.as_array();
 
     let mut active_guard = task_active.try_readwrite()?;
     let mut kind_guard = task_kind.try_readwrite()?;
@@ -343,9 +372,30 @@ pub(crate) fn propose_maintenance_tasks<'py>(
             }
             let step = rounded_i64(global_features[[environment, player, 0]], last_step);
             let day = step / i64::from(turns_per_day);
+            let hour = step % i64::from(turns_per_day);
             let seat_base = (environment * players + player) * capacity;
+            let requested_orders = market_lengths[[environment, player]];
+            let Ok(requested_orders) = usize::try_from(requested_orders) else {
+                return Err(PyValueError::new_err("market length cannot be negative"));
+            };
+            if requested_orders > max_market_orders {
+                return Err(PyValueError::new_err(
+                    "market length is outside the market action capacity",
+                ));
+            }
+            let mut pending_wheat_buy = 0_i64;
+            for order in 0..requested_orders {
+                if market_actions[[environment, player, order, 0]] == MARKET_BUY_PRODUCT
+                    && market_actions[[environment, player, order, 1]]
+                        == i64::from(ITEM_WHEAT)
+                {
+                    pending_wheat_buy +=
+                        market_actions[[environment, player, order, 2]].max(0);
+                }
+            }
 
             let mut needs_feed_count = 0_i64;
+            let mut feed_distances = Vec::<i64>::new();
             let mut needs_fertilizer_count = 0_i64;
             let mut maximum_feed_priority = f32::NEG_INFINITY;
             let mut maximum_fertilizer_priority = f32::NEG_INFINITY;
@@ -513,6 +563,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     let needs_feed = animals && !watered_or_fed;
                     if needs_feed {
                         needs_feed_count += 1;
+                        let shed_access = usize::try_from(access).unwrap_or(0);
+                        let distance = x.abs_diff(shed_access) + y.abs_diff(shed_access);
+                        feed_distances.push(i64::try_from(distance).unwrap_or(i64::MAX));
                         propose_tile(
                             &mut out,
                             output_index,
@@ -578,6 +631,72 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     deadline,
                     ROLE_LOGISTICS,
                 );
+            }
+
+            // Market orders resolve after unit actions. If today's plan buys
+            // Wheat but none is currently fetchable, keep the feed workflow
+            // alive by pre-positioning workers at the shed in the *same* slots
+            // that become FETCH_ITEM once the next observation confirms stock.
+            //
+            // Work backwards from FEED@deadline:
+            //   reach shed at S -> next-turn PICKUP -> d moves -> FEED
+            // therefore S <= deadline - d - 2.
+            let pending_feed_wheat = (wheat_missing - total_wheat_fetch)
+                .max(0)
+                .min(pending_wheat_buy);
+            if total_wheat_fetch == 0 && pending_feed_wheat > 0 {
+                feed_distances.sort_unstable();
+                let feasible_count = usize::try_from(pending_feed_wheat)
+                    .unwrap_or(0)
+                    .min(feed_distances.len());
+                let pending_distances = &feed_distances[..feasible_count];
+
+                let stage_quantities = [
+                    (pending_feed_wheat + 1) / 2,
+                    pending_feed_wheat / 2,
+                ];
+                let mut distance_cursor = 0_usize;
+
+                for (index, extra_slot) in [0_usize, 3_usize].into_iter().enumerate() {
+                    let requested_quantity = stage_quantities[index];
+                    if requested_quantity <= 0 {
+                        continue;
+                    }
+
+                    let requested = usize::try_from(requested_quantity).unwrap_or(0);
+                    let end = distance_cursor
+                        .saturating_add(requested)
+                        .min(pending_distances.len());
+                    if end <= distance_cursor {
+                        continue;
+                    }
+                    let max_feed_distance = pending_distances[distance_cursor..end]
+                        .iter()
+                        .copied()
+                        .max()
+                        .unwrap_or(0);
+                    distance_cursor = end;
+
+                    let latest_stage_hour =
+                        i64::from(deadline) - max_feed_distance - 2;
+                    let stage_active = latest_stage_hour >= hour;
+                    let stage_deadline = i16::try_from(latest_stage_hour)
+                        .unwrap_or(-1);
+
+                    set_global(
+                        &mut out,
+                        seat_base + tile_slots + extra_slot,
+                        stage_active,
+                        TASK_STAGE,
+                        access,
+                        access,
+                        feed_fetch_priority,
+                        ITEM_WHEAT,
+                        requested_quantity,
+                        stage_deadline,
+                        ROLE_LOGISTICS,
+                    );
+                }
             }
 
             let fertilizer_missing = (needs_fertilizer_count - carried_fertilizer).max(0);
