@@ -56,15 +56,15 @@ Observations are player-relative `float32[N, 2, O]`. For each viewer, relative f
 
 | View | Shape after `[N, 2]` | Channels |
 | --- | --- | --- |
-| `global_features` | `[30]` | clock 4, market inventory/price pairs 18, shop counts 8 |
+| `global_features` | `[42]` | clock 4, market inventory/price pairs 18, shop counts 8, per-product shop demand 9, event countdowns 3 |
 | `farms` | `[2, 9]` | money, farmer coordinates, hands, four land flags, hires |
 | `tiles` | `[2, B, B, 24]` | kind 9, crop 5, lifecycle values 10 |
 | `units` | `[2, U, 29]` | active/farmer/position/visibility 5, inventory 12, insertion order 12 |
 | `private` | `[17]` | own shed 12 and seeds 5 |
 
-Thus `O = 65 + 48*B*B + 58*U`, or 18,263 with default `B=10` and `U=231`.
+Thus `O = 77 + 48*B*B + 58*U`, or 18,275 with default `B=10` and `U=231`.
 
-Continuous values use stable game-scale normalization. Values are not clipped and can exceed one. Coordinates divide by `B-1`; inventory divides by shed capacity; item insertion-order IDs divide by 11 and unused positions are `-1`. The 24 tile channels distinguish empty, locked, weed, plant, empty coop/pasture, and each occupied animal type, then encode crop and lifecycle state. `buffer_specs` is the authoritative source for offsets and channel counts.
+Continuous values use stable game-scale normalization. Values are not clipped and can exceed one. Coordinates divide by `B-1`; inventory divides by shed capacity; item insertion-order IDs divide by 11 and unused positions are `-1`. Product-demand channels divide the units consumed at the next shop tick by the maximum possible demand of 16. The final three global channels are normalized turns until the next shop tick, town-center tick, and shop-unlock transition; zero means the event follows the current action. The 24 tile channels distinguish empty, locked, weed, plant, empty coop/pasture, and each occupied animal type, then encode crop and lifecycle state. `buffer_specs` is the authoritative source for offsets and channel counts.
 
 ## Action masks
 

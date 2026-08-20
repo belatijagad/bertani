@@ -9,7 +9,7 @@ import json
 import math
 import resource
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -25,57 +25,97 @@ from bertani.ppo import (
     RewardMode,
     WorkforceMarketPolicy,
     collect_rollout,
+    load_experiment_config,
 )
 from bertani.rule_based import RuleConfig
-from bertani.v9_opponent import DEFAULT_V9_PATH
 from bertani_rules.agent import build_policy
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHECKPOINT = ROOT / "outputs" / "ppo" / "latest.pt"
-DEFAULT_METRICS = ROOT / "outputs" / "ppo" / "metrics.jsonl"
+DEFAULT_CONFIG_FILE = Path(__file__).parent / "config" / "ppo_default.yaml"
 
 
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_FILE)
+    config_args, _ = config_parser.parse_known_args()
+    experiment = load_experiment_config(config_args.config, root=ROOT)
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--updates", type=int, default=1_000)
-    parser.add_argument("--num-envs", type=int, default=32)
-    parser.add_argument("--steps-per-update", type=int, default=32)
-    parser.add_argument("--epochs-per-update", type=int, default=1)
-    parser.add_argument("--minibatch-size", type=int, default=128)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--v9", type=Path, default=DEFAULT_V9_PATH)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument("--metrics-file", type=Path, default=DEFAULT_METRICS)
-    parser.add_argument("--resume", type=Path)
-    parser.add_argument("--checkpoint-every", type=int, default=25)
+    parser.add_argument("--config", type=Path, default=config_args.config)
+    parser.add_argument("--updates", type=int, default=experiment.max_updates)
+    parser.add_argument("--num-envs", type=int, default=experiment.n_envs)
+    parser.add_argument(
+        "--steps-per-update", type=int, default=experiment.ppo.steps_per_update
+    )
+    parser.add_argument(
+        "--epochs-per-update", type=int, default=experiment.ppo.epochs_per_update
+    )
+    parser.add_argument(
+        "--minibatch-size", type=int, default=experiment.ppo.minibatch_size
+    )
+    parser.add_argument(
+        "--learning-rate", type=float, default=experiment.ppo.learning_rate
+    )
+    parser.add_argument("--device", default=experiment.device)
+    parser.add_argument("--seed", type=int, default=experiment.seed)
+    parser.add_argument("--v9", type=Path, default=experiment.opponent_path)
+    parser.add_argument("--checkpoint", type=Path, default=experiment.checkpoint_path)
+    parser.add_argument("--metrics-file", type=Path, default=experiment.metrics_file)
+    parser.add_argument("--resume", type=Path, default=experiment.resume)
+    parser.add_argument(
+        "--checkpoint-every", type=int, default=experiment.checkpoint_every
+    )
     parser.add_argument(
         "--reward",
         type=RewardMode,
         choices=list(RewardMode),
-        default=RewardMode.MARGIN_DELTA,
+        default=experiment.reward,
     )
     parser.add_argument(
         "--market",
         choices=("rule-scaffold", "workforce-only"),
-        default="rule-scaffold",
+        default=experiment.market,
         help="Use rule buying/selling around learned hires, or train hires alone.",
     )
-    parser.add_argument("--max-hires-per-turn", type=int, default=2)
-    parser.add_argument("--no-mixed-precision", action="store_true")
+    parser.add_argument(
+        "--max-hires-per-turn",
+        type=int,
+        default=experiment.max_hires_per_turn,
+    )
+    parser.add_argument(
+        "--mixed-precision",
+        action=argparse.BooleanOptionalAction,
+        default=experiment.ppo.mixed_precision,
+    )
     parser.add_argument(
         "--profile",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=experiment.ppo.profile,
         help="Synchronize CUDA around detailed rollout and optimizer timings.",
     )
     parser.add_argument(
         "--cprofile",
         type=Path,
+        default=experiment.cprofile,
         help="Write a Python cProfile data file for the complete run.",
     )
-    parser.add_argument("--no-progress", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=experiment.progress,
+    )
+    args = parser.parse_args()
+    args.ppo_config = replace(
+        experiment.ppo,
+        steps_per_update=args.steps_per_update,
+        epochs_per_update=args.epochs_per_update,
+        minibatch_size=args.minibatch_size,
+        learning_rate=args.learning_rate,
+        mixed_precision=args.mixed_precision,
+        profile=args.profile,
+    )
+    args.model_config = experiment.model
+    return args
 
 
 def save_checkpoint(
@@ -84,6 +124,7 @@ def save_checkpoint(
     trainer: PPOTrainer,
     ppo_config: PPOConfig,
     model_config: ActorCriticConfig,
+    experiment_config: dict[str, object],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -94,6 +135,7 @@ def save_checkpoint(
             "updates": trainer.updates,
             "ppo_config": ppo_config.as_dict(),
             "model_config": asdict(model_config),
+            "experiment_config": experiment_config,
         },
         temporary,
     )
@@ -106,6 +148,52 @@ def process_peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
+def effective_experiment_config(
+    args: argparse.Namespace,
+    ppo_config: PPOConfig,
+    model_config: ActorCriticConfig,
+) -> dict[str, object]:
+    """Return the fully resolved settings, including command-line overrides."""
+
+    return {
+        "max_updates": args.updates,
+        "optimizer_kwargs": {
+            "lr": ppo_config.learning_rate,
+            "eps": ppo_config.adam_epsilon,
+        },
+        "clip_gradients": ppo_config.max_gradient_norm,
+        "steps_per_update": ppo_config.steps_per_update,
+        "epochs_per_update": ppo_config.epochs_per_update,
+        "train_batch_size": ppo_config.minibatch_size,
+        "use_mixed_precision": ppo_config.mixed_precision,
+        "gamma": ppo_config.gamma,
+        "gae_lambda": ppo_config.gae_lambda,
+        "clip_coefficient": ppo_config.clip_coefficient,
+        "loss_coefficients": {
+            "value": ppo_config.value_coefficient,
+            "entropy": ppo_config.entropy_coefficient,
+        },
+        "normalize_advantages": ppo_config.normalize_advantages,
+        "include_workforce": ppo_config.include_workforce,
+        "env_config": {"n_envs": args.num_envs, "seed": args.seed},
+        "self_play_config": {
+            "opponent_path": str(args.v9),
+            "reward": args.reward.value,
+            "market": args.market,
+            "max_hires_per_turn": args.max_hires_per_turn,
+        },
+        "rl_model_config": asdict(model_config),
+        "device": args.device,
+        "checkpoint_path": str(args.checkpoint),
+        "resume": None if args.resume is None else str(args.resume),
+        "checkpoint_every": args.checkpoint_every,
+        "metrics_file": str(args.metrics_file),
+        "progress": args.progress,
+        "profile": ppo_config.profile,
+        "cprofile": None if args.cprofile is None else str(args.cprofile),
+    }
+
+
 def run(args: argparse.Namespace) -> None:
     if min(args.updates, args.num_envs, args.steps_per_update) <= 0:
         raise ValueError("updates, num-envs, and steps-per-update must be positive")
@@ -115,15 +203,9 @@ def run(args: argparse.Namespace) -> None:
     np.random.seed(args.seed)
     device = torch.device(args.device)
 
-    ppo_config = PPOConfig(
-        steps_per_update=args.steps_per_update,
-        epochs_per_update=args.epochs_per_update,
-        minibatch_size=args.minibatch_size,
-        learning_rate=args.learning_rate,
-        mixed_precision=not args.no_mixed_precision,
-        profile=args.profile,
-    )
-    model_config = ActorCriticConfig()
+    ppo_config: PPOConfig = args.ppo_config
+    model_config: ActorCriticConfig = args.model_config
+    experiment_config = effective_experiment_config(args, ppo_config, model_config)
     model = build_actor_critic(model_config).train()
     trainer = PPOTrainer(model, ppo_config, device=device)
     if args.resume is not None:
@@ -147,15 +229,11 @@ def run(args: argparse.Namespace) -> None:
 
     economy = None
     if args.market == "rule-scaffold":
-        economy = build_policy(
-            RuleConfig(), use_opening=True, liquidation_days=1
-        )
-    market = WorkforceMarketPolicy(
-        economy, max_hires_per_turn=args.max_hires_per_turn
-    )
+        economy = build_policy(RuleConfig(), use_opening=True, liquidation_days=1)
+    market = WorkforceMarketPolicy(economy, max_hires_per_turn=args.max_hires_per_turn)
 
     args.metrics_file.parent.mkdir(parents=True, exist_ok=True)
-    progress_disabled = args.no_progress or not sys.stderr.isatty()
+    progress_disabled = not args.progress or not sys.stderr.isatty()
     cumulative_games = cumulative_wins = cumulative_ties = cumulative_losses = 0
     cumulative_margin = 0.0
     update_progress = tqdm(
@@ -226,7 +304,12 @@ def run(args: argparse.Namespace) -> None:
         checkpoint_saved = trainer.updates % args.checkpoint_every == 0
         if checkpoint_saved:
             save_checkpoint(
-                args.checkpoint, model, trainer, ppo_config, model_config
+                args.checkpoint,
+                model,
+                trainer,
+                ppo_config,
+                model_config,
+                experiment_config,
             )
 
         rollout_attributed = sum(
@@ -266,9 +349,7 @@ def run(args: argparse.Namespace) -> None:
             "rollout/action_transfer_seconds": profile.action_transfer_seconds,
             "rollout/market_seconds": profile.market_seconds,
             "rollout/v9_seconds": profile.v9_seconds,
-            "rollout/action_composition_seconds": (
-                profile.action_composition_seconds
-            ),
+            "rollout/action_composition_seconds": (profile.action_composition_seconds),
             "rollout/environment_seconds": profile.environment_seconds,
             "rollout/reward_seconds": profile.reward_seconds,
             "rollout/unattributed_seconds": max(
@@ -307,10 +388,7 @@ def run(args: argparse.Namespace) -> None:
             "train/unattributed_seconds": max(
                 stats.update_seconds - train_attributed, 0.0
             ),
-            **{
-                f"train/{name}": value
-                for name, value in stats.as_dict().items()
-            },
+            **{f"train/{name}": value for name, value in stats.as_dict().items()},
         }
         line = json.dumps(metrics, sort_keys=True)
         with args.metrics_file.open("a", encoding="utf-8") as metrics_file:
@@ -329,7 +407,14 @@ def run(args: argparse.Namespace) -> None:
         update_progress.update()
 
     update_progress.close()
-    save_checkpoint(args.checkpoint, model, trainer, ppo_config, model_config)
+    save_checkpoint(
+        args.checkpoint,
+        model,
+        trainer,
+        ppo_config,
+        model_config,
+        experiment_config,
+    )
 
 
 def main() -> None:

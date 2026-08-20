@@ -11,7 +11,7 @@ mod rng;
 mod state;
 
 pub use action::{Action, MarketOrder, UnitAction};
-pub use constants::{Animal, Crop, Item, Product, Quadrant, Shop, Structure};
+pub use constants::{Animal, Crop, Item, Product, Quadrant, Shop, Structure, shop_products};
 pub use engine::Sim;
 pub use state::{
     Config, DEFAULT_MARKET_PARAMS, Farm, Inventory, Market, MarketParams, PlacedAnimal, Plant,

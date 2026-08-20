@@ -1,6 +1,8 @@
 #![allow(clippy::cast_precision_loss)]
 
-use crate::constants::{ANIMAL_DEFS, CROP_DEFS, LAND_ORDER, LAND_PRICES, MAX_SHOP_INSTANCES};
+use crate::constants::{
+    ANIMAL_DEFS, CROP_DEFS, LAND_ORDER, LAND_PRICES, MAX_SHOP_INSTANCES, shop_products,
+};
 use crate::rng::PyRandom;
 use crate::state::{PlacedAnimal, Plant, animal_structure};
 use crate::{
@@ -825,24 +827,6 @@ fn float_less_than_integer(value: f64, integer: i128) -> bool {
         return true;
     }
     (value.floor() as i128) < integer
-}
-
-fn shop_products(shop: Shop) -> &'static [Product] {
-    match shop {
-        Shop::Bakery => &[Product::Egg, Product::Wheat],
-        Shop::PizzaShop => &[Product::Milk, Product::Tomato, Product::Wheat],
-        Shop::BrunchSpot => &[Product::Egg, Product::Wheat, Product::Strawberry],
-        Shop::YarnStore => &[Product::Wool],
-        Shop::IceCreamShop => &[Product::Strawberry, Product::Milk, Product::Wheat],
-        Shop::PetCafe => &[Product::Carrot],
-        Shop::SmoothieShop => &[Product::Strawberry, Product::Milk],
-        Shop::FarmersMarket => &[
-            Product::Wheat,
-            Product::Carrot,
-            Product::Tomato,
-            Product::Strawberry,
-        ],
-    }
 }
 
 impl Sim {

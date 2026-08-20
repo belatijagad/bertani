@@ -353,6 +353,29 @@ impl Shop {
     }
 }
 
+/// Products removed from the shared market whenever this shop consumes.
+///
+/// A shop with a single product consumes two units; callers apply that
+/// multiplier because the product list also describes the shop's recipe.
+#[must_use]
+pub const fn shop_products(shop: Shop) -> &'static [Product] {
+    match shop {
+        Shop::Bakery => &[Product::Egg, Product::Wheat],
+        Shop::PizzaShop => &[Product::Milk, Product::Tomato, Product::Wheat],
+        Shop::BrunchSpot => &[Product::Egg, Product::Wheat, Product::Strawberry],
+        Shop::YarnStore => &[Product::Wool],
+        Shop::IceCreamShop => &[Product::Strawberry, Product::Milk, Product::Wheat],
+        Shop::PetCafe => &[Product::Carrot],
+        Shop::SmoothieShop => &[Product::Strawberry, Product::Milk],
+        Shop::FarmersMarket => &[
+            Product::Wheat,
+            Product::Carrot,
+            Product::Tomato,
+            Product::Strawberry,
+        ],
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CropDef {
     pub seed_cost: i64,

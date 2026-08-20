@@ -60,6 +60,9 @@ class RuleConfig:
     opening_crop_targets: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
     # GOOSE, COW, SHEEP order.
     opening_animal_targets: tuple[int, int, int] = (0, 0, 0)
+    town_shop_unlock_interval: int = 3
+    town_shop_sell_interval: int = 4
+    town_center_sell_interval: int = 24
 
     def __post_init__(self) -> None:
         if self.episode_steps < 1:
@@ -70,6 +73,12 @@ class RuleConfig:
             raise ValueError("starting_money must be positive")
         if self.shed_capacity < 1:
             raise ValueError("shed_capacity must be positive")
+        if self.town_shop_unlock_interval < 1:
+            raise ValueError("town_shop_unlock_interval must be positive")
+        if self.town_shop_sell_interval < 1:
+            raise ValueError("town_shop_sell_interval must be positive")
+        if self.town_center_sell_interval < 1:
+            raise ValueError("town_center_sell_interval must be positive")
         if self.liquidation_days < 0:
             raise ValueError("liquidation_days cannot be negative")
 

@@ -24,7 +24,7 @@ class TorchObservation(NamedTuple):
     spatial: torch.Tensor
     """Float tensor shaped ``[batch * players, 48, board, board]``."""
     global_features: torch.Tensor
-    """Float tensor shaped ``[batch * players, 65]``."""
+    """Float tensor shaped ``[batch * players, 77]``."""
     workers: torch.Tensor
     """Float tensor shaped ``[batch * players, max_units, 29]``."""
     worker_positions: torch.Tensor

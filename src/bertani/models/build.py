@@ -16,7 +16,7 @@ class ActorCriticConfig:
     """Small defaults intended for iteration before expensive scaling runs."""
 
     spatial_channels: int = 48
-    global_channels: int = 65
+    global_channels: int = 77
     worker_channels: int = 29
     d_model: int = 64
     n_blocks: int = 5

@@ -7,7 +7,7 @@ It is intentionally a model boundary rather than a training framework.
 ```text
 both farms' tile channels [48, B, B] -> spatial projection --+
                                                                +-> residual CNN
-global/farm/private channels [65]       -> global projection ---+        |
+global/farm/private channels [77]       -> global projection ---+        |
                                                                         +-> value
                                                                         +-> workforce
                                                                         +-> gather at worker positions
@@ -110,12 +110,20 @@ and minibatch optimization are independent modules under `bertani.ppo`.
 Start a training run with:
 
 ```bash
-uv run python scripts/train_ppo.py \
-  --num-envs 32 \
-  --steps-per-update 32 \
-  --updates 1000 \
-  --device cuda
+uv run python scripts/train_ppo.py
 ```
+
+The default experiment is defined in
+`scripts/config/ppo_default.yaml`, following Isaiah's grouped PPO config
+layout. Copy it for an experiment and pass the new file explicitly:
+
+```bash
+cp scripts/config/ppo_default.yaml scripts/config/ppo_worker_ablation.yaml
+uv run python scripts/train_ppo.py --config scripts/config/ppo_worker_ablation.yaml
+```
+
+Command-line options still override the loaded file for quick one-off changes,
+for example `--updates 10 --num-envs 8 --device cpu --no-progress`.
 
 The default `margin_delta` reward is the per-turn change in normalized bank
 margin. It telescopes to the final margin without discarding information about

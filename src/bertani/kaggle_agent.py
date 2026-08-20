@@ -33,6 +33,16 @@ SHOP_NAMES = (
     "SMOOTHIE_SHOP",
     "YARN_STORE",
 )
+SHOP_PRODUCT_INDICES = (
+    (5, 0),
+    (5, 0, 3),
+    (0, 1, 2, 3),
+    (3, 6, 0),
+    (1,),
+    (6, 2, 0),
+    (3, 6),
+    (7,),
+)
 UNIT_NAMES = tuple(operation.name for operation in UnitOp)
 MARKET_NAMES = tuple(operation.name for operation in MarketOp)
 
@@ -59,6 +69,15 @@ def _rule_config(configuration: object) -> RuleConfig:
         turns_per_day=int(_config_value(configuration, "turnsPerDay", 24)),
         starting_money=int(_config_value(configuration, "startingMoney", 3_000)),
         shed_capacity=int(_config_value(configuration, "shedCapacity", 100)),
+        town_shop_unlock_interval=int(
+            _config_value(configuration, "townShopUnlockInterval", 3)
+        ),
+        town_shop_sell_interval=int(
+            _config_value(configuration, "townShopSellInterval", 4)
+        ),
+        town_center_sell_interval=int(
+            _config_value(configuration, "townCenterSellInterval", 24)
+        ),
     )
 
 
@@ -130,15 +149,23 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
     step = int(_get(obs, "step", 0))
     day = int(_get(obs, "day", step // config.turns_per_day))
 
-    global_features = np.zeros((1, 2, 30), dtype=np.float32)
+    global_features = np.zeros((1, 2, 42), dtype=np.float32)
     farms = np.zeros((1, 2, 2, 9), dtype=np.float32)
     tiles = np.zeros((1, 2, 2, board_size, board_size, 24), dtype=np.float32)
     units = np.zeros((1, 2, 2, max_units, 29), dtype=np.float32)
     private = np.zeros((1, 2, 17), dtype=np.float32)
     active_units = np.zeros((1, 2, max_units), dtype=np.bool_)
 
-    for player_axis in range(2):
-        global_features[0, player_axis, 0] = step / max(1, config.episode_steps - 1)
+    last_step = max(1, config.episode_steps - 1)
+    last_day = max(1, (config.episode_steps - 1) // config.turns_per_day)
+    hour = step % config.turns_per_day
+    clock = (
+        step / last_step,
+        day / last_day,
+        hour / max(1, config.turns_per_day - 1),
+        max(0, config.episode_steps - 1 - step) / last_step,
+    )
+    global_features[0, seat, :4] = clock
     market = _get(obs, "market", {}) or {}
     market_prices = _get(market, "prices", {}) or {}
     market_inventory = _get(market, "inventory", {}) or {}
@@ -156,6 +183,34 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
     )
     for index, shop in enumerate(SHOP_NAMES):
         global_features[0, seat, 22 + index] = unlocked_shops.count(shop) / 8.0
+
+    shop_demand = np.zeros(9, dtype=np.float32)
+    for shop, products in zip(SHOP_NAMES, SHOP_PRODUCT_INDICES):
+        multiplier = 2 if len(products) == 1 else 1
+        count = unlocked_shops.count(shop)
+        for product_index in products:
+            shop_demand[product_index] += count * multiplier
+    global_features[0, seat, 30:39] = shop_demand / 16.0
+
+    def turns_until_tick(interval: int) -> float:
+        remainder = step % interval
+        turns = 0 if remainder == 0 else interval - remainder
+        return turns / interval
+
+    global_features[0, seat, 39] = turns_until_tick(
+        config.town_shop_sell_interval
+    )
+    global_features[0, seat, 40] = turns_until_tick(
+        config.town_center_sell_interval
+    )
+    unlock_interval = config.town_shop_unlock_interval
+    days_until_boundary = unlock_interval - day % unlock_interval
+    turns_until_unlock = (
+        days_until_boundary * config.turns_per_day - hour - 1
+    )
+    global_features[0, seat, 41] = turns_until_unlock / (
+        unlock_interval * config.turns_per_day
+    )
 
     for relative, farm_index in enumerate((seat, 1 - seat)):
         if farm_index >= len(farms_raw):

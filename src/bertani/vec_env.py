@@ -467,7 +467,7 @@ class VecEnv:
         # These defaults are the public v1 layout. Native-provided offsets win,
         # allowing the extension to add layouts while retaining one view builder.
         global_offset = _offset(specs, "observation", "global", 0)
-        farms_offset = _offset(specs, "observation", "farms", 30)
+        farms_offset = _offset(specs, "observation", "farms", 42)
         tiles_offset = _offset(specs, "observation", "tiles", farms_offset + 2 * 9)
         units_offset = _offset(
             specs,

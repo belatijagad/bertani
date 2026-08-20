@@ -30,7 +30,7 @@ def test_default_model_stays_near_half_a_million_parameters() -> None:
     model = build_actor_critic()
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
 
-    assert parameter_count == 475_580
+    assert parameter_count == 476_348
     assert model.encoder.spatial_input[0].out_channels == 64
     assert len(model.encoder.residual_blocks) == 5
 
@@ -48,7 +48,7 @@ def test_batch_adapter_matches_the_vector_environment_layout() -> None:
     action_info = TorchActionInfo.from_batch(batch)
 
     assert observation.spatial.shape == (4, 48, 10, 10)
-    assert observation.global_features.shape == (4, 65)
+    assert observation.global_features.shape == (4, 77)
     assert observation.workers.shape == (4, env.max_units, 29)
     assert observation.worker_positions.shape == (4, env.max_units, 2)
     assert action_info.unit_operation_mask.shape == (
@@ -138,7 +138,7 @@ def test_one_shared_worker_head_accepts_different_worker_dimensions() -> None:
         argument_mask[..., int(UnitOp.PASS), 0] = True
         observation = TorchObservation(
             spatial=torch.zeros((2, 48, 10, 10)),
-            global_features=torch.zeros((2, 65)),
+            global_features=torch.zeros((2, 77)),
             workers=torch.zeros((2, max_units, 29)),
             worker_positions=torch.zeros((2, max_units, 2), dtype=torch.long),
         )

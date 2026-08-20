@@ -7,7 +7,9 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use kaggriculture_core::{Animal, Crop, Farm, Item, Product, Quadrant, Sim, Structure, Tile};
+use kaggriculture_core::{
+    Animal, Crop, Farm, Item, Product, Quadrant, Sim, Structure, Tile, shop_products,
+};
 
 use crate::action::{
     ITEM_COUNT, MARKET_ACTION_COUNT, MARKET_BUY_ANIMAL, MARKET_BUY_LAND, MARKET_BUY_PRODUCT,
@@ -17,7 +19,7 @@ use crate::action::{
     UNIT_PLANT, UNIT_SOUTH, UNIT_WATER, UNIT_WEST,
 };
 
-pub(crate) const GLOBAL_CHANNELS: usize = 30;
+pub(crate) const GLOBAL_CHANNELS: usize = 42;
 pub(crate) const FARM_CHANNELS: usize = 9;
 pub(crate) const TILE_CHANNELS: usize = 24;
 pub(crate) const UNIT_CHANNELS: usize = 29;
@@ -260,6 +262,51 @@ fn encode_global(sim: &Sim, spec: ObservationSpec, output: &mut [f32]) {
     for (index, count) in counts.into_iter().enumerate() {
         output[cursor + index] = count as f32 / 8.0;
     }
+    cursor += counts.len();
+
+    // Aggregate the exact quantity removed at the next shop-consumption tick.
+    // Eight single-product shops is the largest possible demand (16 units),
+    // so all channels remain in [0, 1] under the configured shop cap.
+    let mut shop_demand = [0_i64; Product::COUNT];
+    for shop in &state.town.unlocked_shops {
+        let products = shop_products(*shop);
+        let multiplier = if products.len() == 1 { 2 } else { 1 };
+        for product in products {
+            shop_demand[product.index()] += multiplier;
+        }
+    }
+    for (index, demand) in shop_demand.into_iter().enumerate() {
+        output[cursor + index] = ratio_i64(demand, 16);
+    }
+    cursor += Product::COUNT;
+
+    output[cursor] = turns_until_tick(state.step, config.town_shop_sell_interval);
+    output[cursor + 1] = turns_until_tick(state.step, config.town_center_sell_interval);
+    output[cursor + 2] = turns_until_shop_unlock(
+        state.day,
+        state.hour,
+        config.turns_per_day,
+        config.town_shop_unlock_interval,
+    );
+}
+
+fn turns_until_tick(step: u32, interval: u32) -> f32 {
+    let remainder = step % interval;
+    let turns = if remainder == 0 {
+        0
+    } else {
+        interval - remainder
+    };
+    ratio_u32(turns, interval)
+}
+
+fn turns_until_shop_unlock(day: u32, hour: u32, turns_per_day: u32, interval: u32) -> f32 {
+    let days_until_boundary = interval - day % interval;
+    let turns = days_until_boundary
+        .saturating_mul(turns_per_day)
+        .saturating_sub(hour)
+        .saturating_sub(1);
+    ratio_u32(turns, interval.saturating_mul(turns_per_day))
 }
 
 fn encode_farm(
@@ -763,11 +810,11 @@ mod tests {
     fn specs_have_stable_contiguous_offsets() {
         let observation = ObservationSpec::new(10, 64);
         assert_eq!(observation.global, 0);
-        assert_eq!(observation.farms, 30);
-        assert_eq!(observation.tiles, 48);
-        assert_eq!(observation.units, 4_848);
-        assert_eq!(observation.private, 8_560);
-        assert_eq!(observation.total, 8_577);
+        assert_eq!(observation.farms, 42);
+        assert_eq!(observation.tiles, 60);
+        assert_eq!(observation.units, 4_860);
+        assert_eq!(observation.private, 8_572);
+        assert_eq!(observation.total, 8_589);
 
         let mask = MaskSpec::new(64);
         assert_eq!(mask.unit_ops, 0);
@@ -806,6 +853,11 @@ mod tests {
         assert_eq!(obs0[spec.farm_offset(1)], 2.0);
         assert_eq!(obs0[spec.private + Item::Milk.index()], 0.01);
         assert_eq!(obs0[spec.global + 22 + Shop::Bakery.index()], 0.25);
+        assert_eq!(obs0[spec.global + 30 + Product::Wheat.index()], 0.125);
+        assert_eq!(obs0[spec.global + 30 + Product::Egg.index()], 0.125);
+        assert_eq!(obs0[spec.global + 39], 0.75);
+        assert_eq!(obs0[spec.global + 40], 23.0 / 24.0);
+        assert_eq!(obs0[spec.global + 41], 70.0 / 72.0);
 
         let own_unit = spec.unit_offset(0, 0);
         assert_eq!(obs0[own_unit + 4], 1.0);
@@ -829,6 +881,40 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0.0)
         );
+    }
+
+    #[test]
+    fn derived_town_features_encode_recipes_and_event_boundaries() {
+        let mut sim = Sim::default();
+        sim.state.town.unlocked_shops = Shop::SORTED.to_vec();
+        sim.state.step = 71;
+        sim.state.day = 2;
+        sim.state.hour = 23;
+
+        let max_units = 1;
+        let spec = ObservationSpec::new(sim.config.board_size, max_units);
+        let (mut observation, mut mask, mut active) = buffers(&sim, max_units);
+        let mut overflow = false;
+        encode(
+            &sim,
+            0,
+            &mut observation,
+            &mut mask,
+            &mut active,
+            &mut overflow,
+        )
+        .unwrap();
+
+        let expected_demand = [5, 3, 2, 4, 0, 2, 3, 2, 0];
+        for (product, demand) in Product::ALL.into_iter().zip(expected_demand) {
+            assert_eq!(
+                observation[spec.global + 30 + product.index()],
+                demand as f32 / 16.0
+            );
+        }
+        assert_eq!(observation[spec.global + 39], 0.25);
+        assert_eq!(observation[spec.global + 40], 1.0 / 24.0);
+        assert_eq!(observation[spec.global + 41], 0.0);
     }
 
     #[test]
