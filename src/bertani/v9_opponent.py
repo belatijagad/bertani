@@ -8,6 +8,7 @@ bank once, while saving the small mutable state independently for every slot.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,16 @@ class V9CacheStats:
 
     hits: int
     misses: int
+
+
+@dataclass(frozen=True)
+class SelfPlayStepProfile:
+    """Wall-clock split for the most recent composed self-play step."""
+
+    opponent_seconds: float = 0.0
+    composition_seconds: float = 0.0
+    environment_seconds: float = 0.0
+    total_seconds: float = 0.0
 
 
 def _freeze(value: object) -> object:
@@ -318,6 +329,7 @@ class V9SelfPlayEnv:
         self.opponent_seats = 1 - self.learner_seats
         self.learner_flat_indices = 2 * self.games + self.learner_seats
         self._batch: Batch | None = None
+        self.last_step_profile = SelfPlayStepProfile()
 
     @classmethod
     def from_path(
@@ -364,6 +376,7 @@ class V9SelfPlayEnv:
     ) -> Batch:
         """Advance using compact learner-only tensors shaped with leading ``N``."""
 
+        step_started = time.perf_counter()
         batch = self.batch
         expected_units = (
             self.environment.num_envs,
@@ -381,9 +394,11 @@ class V9SelfPlayEnv:
         unit_actions, market_actions, market_lengths = (
             self.environment.clear_actions()
         )
+        opponent_started = time.perf_counter()
         opponent = self.opponent.act(
             self.environment, batch, seats=self.opponent_seats
         )
+        opponent_finished = time.perf_counter()
         index = (self.games, self.learner_seats)
         opponent_index = (self.games, self.opponent_seats)
         unit_actions[index] = learner_unit_actions
@@ -417,8 +432,16 @@ class V9SelfPlayEnv:
             market_lengths[index] = learner_market_lengths
         market_actions[opponent_index] = opponent.market_actions[opponent_index]
         market_lengths[opponent_index] = opponent.market_lengths[opponent_index]
+        environment_started = time.perf_counter()
         self._batch = self.environment.step(
             unit_actions, market_actions, market_lengths
+        )
+        finished = time.perf_counter()
+        self.last_step_profile = SelfPlayStepProfile(
+            opponent_seconds=opponent_finished - opponent_started,
+            composition_seconds=environment_started - opponent_finished,
+            environment_seconds=finished - environment_started,
+            total_seconds=finished - step_started,
         )
         return self._batch
 
@@ -431,6 +454,7 @@ class V9SelfPlayEnv:
 
 __all__ = [
     "DEFAULT_V9_PATH",
+    "SelfPlayStepProfile",
     "V9CacheStats",
     "V9OpponentPolicy",
     "V9SelfPlayEnv",

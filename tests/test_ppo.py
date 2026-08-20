@@ -134,7 +134,7 @@ def test_collect_and_update_ppo_smoke() -> None:
     environment = VecEnv(
         2,
         auto_reset=True,
-        episode_steps=6,
+        episode_steps=3,
         turns_per_day=3,
         weed_spawn_chance=0.0,
     )
@@ -150,10 +150,11 @@ def test_collect_and_update_ppo_smoke() -> None:
         epochs_per_update=2,
         minibatch_size=2,
         mixed_precision=False,
+        profile=True,
     )
     reward = CompetitiveReward()
     reward.reset(self_play, batch)
-    rollout = collect_rollout(
+    collection = collect_rollout(
         self_play,
         model,
         WorkforceMarketPolicy(max_hires_per_turn=1),
@@ -161,6 +162,7 @@ def test_collect_and_update_ppo_smoke() -> None:
         config,
         device=torch.device("cpu"),
     )
+    rollout = collection.rollout
     trainer = PPOTrainer(model, config, device="cpu")
     before = next(model.parameters()).detach().clone()
 
@@ -168,6 +170,22 @@ def test_collect_and_update_ppo_smoke() -> None:
 
     assert rollout.rewards.shape == (2, 2)
     assert rollout.values.shape == (3, 2)
+    assert collection.profile.transitions == 4
+    assert collection.profile.total_seconds > 0.0
+    assert collection.profile.policy_forward_seconds > 0.0
+    assert collection.profile.synchronized
+    assert collection.episodes.completed == 2
+    assert (
+        collection.episodes.wins
+        + collection.episodes.ties
+        + collection.episodes.losses
+        == 2
+    )
     assert trainer.updates == 1
     assert not torch.equal(before, next(model.parameters()).detach())
     assert all(np.isfinite(value) for value in stats.as_dict().values())
+    assert stats.samples_per_second > 0.0
+    assert stats.forward_seconds > 0.0
+    assert stats.backward_seconds > 0.0
+    assert stats.optimizer_seconds > 0.0
+    assert stats.profile_synchronized == 1.0

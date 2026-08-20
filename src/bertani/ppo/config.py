@@ -21,6 +21,7 @@ class PPOConfig:
     normalize_advantages: bool = True
     include_workforce: bool = True
     mixed_precision: bool = True
+    profile: bool = False
 
     def __post_init__(self) -> None:
         positive = {

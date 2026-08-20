@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 rl = [
     "torch>=2.7",
+    "tqdm>=4.67",
 ]
 
 [project.scripts]

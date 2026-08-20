@@ -128,3 +128,35 @@ buy, sell, land, seed, and animal orders while replacing its hires with the
 network's workforce target. This gives worker PPO a functioning economy without
 pretending those economic actions were sampled by the neural policy. Use
 `--market workforce-only` to remove that scaffold.
+
+Training displays an overall `tqdm` update bar plus nested rollout-step and
+optimizer-minibatch bars. The active phase is shown explicitly, with rollout
+and training throughput, loss, and recent win rate in the main postfix. Disable
+the bars for batch jobs with `--no-progress`.
+
+Every update is also appended as JSON to `outputs/ppo/metrics.jsonl`. Metrics
+include:
+
+- Observation packing, device transfer, neural forward, and action transfer
+- Rule-market generation, V9 inference, action composition, and Rust stepping
+- PPO preparation, device transfer, forward, backward, and optimizer time
+- Rollout and optimization throughput
+- Win/tie/loss counts, final margin, explained variance, KL, and clip fraction
+- V9 cache deltas, process RSS, and CUDA memory
+
+CUDA launches are asynchronous during normal training. Pass `--profile` to
+synchronize at timing boundaries and obtain accurate component timings; this
+intentionally reduces throughput. For call-level Python profiling, write a
+standard `pstats` file:
+
+```bash
+uv run python scripts/train_ppo.py \
+  --updates 2 --profile \
+  --cprofile outputs/ppo/training.prof
+
+uv run python -m pstats outputs/ppo/training.prof
+```
+
+The V9 and environment timers surround the Python/Rust boundary separately,
+which makes it straightforward to tell whether an optimization belongs in the
+replay policy adapter, tensor preparation, or native simulator.

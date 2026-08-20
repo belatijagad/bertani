@@ -106,6 +106,9 @@ def test_self_play_wrapper_composes_alternating_seats() -> None:
     ].any()
     assert (wrapper.learner_rewards() == 0.0).all()
     assert not wrapper.learner_dones().any()
+    assert wrapper.last_step_profile.total_seconds > 0.0
+    assert wrapper.last_step_profile.opponent_seconds >= 0.0
+    assert wrapper.last_step_profile.environment_seconds >= 0.0
 
 
 def test_agent_loader_restores_process_gc_setting(tmp_path: Path) -> None:

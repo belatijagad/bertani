@@ -206,6 +206,7 @@ dependencies = [
 [package.optional-dependencies]
 rl = [
     { name = "torch" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -220,6 +221,7 @@ requires-dist = [
     { name = "kaggle-environments", specifier = "==1.32.7" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "torch", marker = "extra == 'rl'", specifier = ">=2.7" },
+    { name = "tqdm", marker = "extra == 'rl'", specifier = ">=4.67" },
 ]
 provides-extras = ["rl"]
 
