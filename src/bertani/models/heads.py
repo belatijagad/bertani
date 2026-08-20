@@ -75,6 +75,9 @@ class WorkerActorHead(nn.Module):
         observation: TorchObservation,
         action_info: TorchActionInfo,
         temperature: float | None,
+        *,
+        operations: torch.Tensor | None = None,
+        arguments: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         local = self._gather_worker_locations(encoded_map, observation.worker_positions)
         worker_embedding = self.worker_input(
@@ -101,7 +104,8 @@ class WorkerActorHead(nn.Module):
             ),
             dim=-1,
         )
-        operations = sample_log_probs(operation_log_probs, temperature)
+        if operations is None:
+            operations = sample_log_probs(operation_log_probs, temperature)
         operations = torch.where(
             action_info.active_workers,
             operations,
@@ -111,7 +115,8 @@ class WorkerActorHead(nn.Module):
             -2,
             operations[..., None, None].expand(-1, -1, 1, ITEM_COUNT),
         ).squeeze(-2)
-        arguments = sample_log_probs(selected_argument_log_probs, temperature)
+        if arguments is None:
+            arguments = sample_log_probs(selected_argument_log_probs, temperature)
         arguments = torch.where(action_info.active_workers, arguments, 0)
         return operation_log_probs, argument_log_probs, operations, arguments
 
@@ -156,10 +161,14 @@ class WorkforceHead(nn.Module):
         self,
         encoded_map: torch.Tensor,
         temperature: float | None,
+        *,
+        target_hands: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pooled = encoded_map.flatten(start_dim=-2).mean(dim=-1)
         log_probs = functional.log_softmax(self.layers(pooled), dim=-1)
-        return log_probs, sample_log_probs(log_probs, temperature)
+        if target_hands is None:
+            target_hands = sample_log_probs(log_probs, temperature)
+        return log_probs, target_hands
 
 
 class ValueHead(nn.Module):

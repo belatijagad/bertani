@@ -100,3 +100,31 @@ environment, restores Python cyclic garbage collection after import, reuses the
 native action buffers, and caches identical states within a vector step. Do not
 instantiate one V9 module per environment or put `NativeFileAgentPolicy` in the
 PPO hot loop.
+
+## PPO training
+
+The PPO implementation follows the same separation used in Isaiah Pressman's
+Lux agent: rollout collection, typed experience storage, GAE/loss equations,
+and minibatch optimization are independent modules under `bertani.ppo`.
+
+Start a training run with:
+
+```bash
+uv run python scripts/train_ppo.py \
+  --num-envs 32 \
+  --steps-per-update 32 \
+  --updates 1000 \
+  --device cuda
+```
+
+The default `margin_delta` reward is the per-turn change in normalized bank
+margin. It telescopes to the final margin without discarding information about
+how strongly a game was won or lost. `terminal_margin` and `win_loss` can be
+selected with `--reward`.
+
+The current neural baseline has worker and workforce heads but no complete
+market decoder. By default, `--market rule-scaffold` retains the rule policy's
+buy, sell, land, seed, and animal orders while replacing its hires with the
+network's workforce target. This gives worker PPO a functioning economy without
+pretending those economic actions were sampled by the neural policy. Use
+`--market workforce-only` to remove that scaffold.

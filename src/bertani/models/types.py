@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import NamedTuple
 
+import numpy as np
 import torch
+from numpy.typing import NDArray
 
 from ..vec_env import Batch
 
@@ -42,45 +44,92 @@ class TorchObservation(NamedTuple):
         """
 
         views = batch.observation_views
-        environments, players, relative_farms, board, _, tile_channels = (
-            views.tiles.shape
+        environments, players = batch.active_units.shape[:2]
+        return cls._from_arrays(
+            tiles=views.tiles,
+            global_features=views.global_features,
+            farms=views.farms,
+            private=views.private,
+            units=views.units[:, :, 0],
+            active_units=batch.active_units,
+            flat_batch=environments * players,
+            device=device,
         )
-        flat_batch = environments * players
 
-        tiles = torch.from_numpy(views.tiles).reshape(
+    @classmethod
+    def from_batch_seats(
+        cls,
+        batch: Batch,
+        seats: NDArray[np.int64],
+        device: torch.device | str | None = None,
+    ) -> TorchObservation:
+        """Materialize one selected player perspective per environment."""
+
+        environments = batch.active_units.shape[0]
+        if seats.shape != (environments,):
+            raise ValueError(f"seats must have shape ({environments},)")
+        if np.any((seats < 0) | (seats > 1)):
+            raise ValueError("seats must contain only 0 or 1")
+        games = np.arange(environments, dtype=np.int64)
+        views = batch.observation_views
+        return cls._from_arrays(
+            tiles=views.tiles[games, seats],
+            global_features=views.global_features[games, seats],
+            farms=views.farms[games, seats],
+            private=views.private[games, seats],
+            units=views.units[games, seats, 0],
+            active_units=batch.active_units[games, seats],
+            flat_batch=environments,
+            device=device,
+        )
+
+    @classmethod
+    def _from_arrays(
+        cls,
+        *,
+        tiles: np.ndarray,
+        global_features: np.ndarray,
+        farms: np.ndarray,
+        private: np.ndarray,
+        units: np.ndarray,
+        active_units: np.ndarray,
+        flat_batch: int,
+        device: torch.device | str | None,
+    ) -> TorchObservation:
+        relative_farms, board, _, tile_channels = tiles.shape[-4:]
+
+        tile_tensor = torch.from_numpy(tiles).reshape(
             flat_batch,
             relative_farms,
             board,
             board,
             tile_channels,
         )
-        spatial = tiles.permute(0, 1, 4, 2, 3).flatten(1, 2).contiguous()
+        spatial = tile_tensor.permute(0, 1, 4, 2, 3).flatten(1, 2).contiguous()
 
-        global_features = torch.cat(
+        global_tensor = torch.cat(
             (
-                torch.from_numpy(views.global_features).reshape(flat_batch, -1),
-                torch.from_numpy(views.farms).reshape(flat_batch, -1),
-                torch.from_numpy(views.private).reshape(flat_batch, -1),
+                torch.from_numpy(global_features).reshape(flat_batch, -1),
+                torch.from_numpy(farms).reshape(flat_batch, -1),
+                torch.from_numpy(private).reshape(flat_batch, -1),
             ),
             dim=-1,
         )
-        workers = (
-            torch.from_numpy(views.units[:, :, 0])
-            .reshape(flat_batch, views.units.shape[-2], views.units.shape[-1])
-            .contiguous()
-        )
+        workers = torch.from_numpy(units).reshape(
+            flat_batch, units.shape[-2], units.shape[-1]
+        ).contiguous()
 
         # Unit channels 2 and 3 are normalized x and y coordinates. Inactive
         # rows may contain placeholder values; force them to the harmless
         # origin before the actor gathers from the spatial map.
-        active = torch.from_numpy(batch.active_units).reshape(flat_batch, -1)
+        active = torch.from_numpy(active_units).reshape(flat_batch, -1)
         positions = torch.round(workers[..., 2:4] * float(board - 1)).long()
         positions = positions.clamp(0, board - 1)
         positions = torch.where(active.unsqueeze(-1), positions, 0)
 
         observation = cls(
             spatial=spatial,
-            global_features=global_features,
+            global_features=global_tensor,
             workers=workers,
             worker_positions=positions,
         )
@@ -132,6 +181,29 @@ class TorchActionInfo(NamedTuple):
             active_workers=torch.from_numpy(batch.active_units).reshape(
                 flat_batch, max_units
             ),
+        )
+        return action_info if device is None else action_info.to_device(device)
+
+    @classmethod
+    def from_batch_seats(
+        cls,
+        batch: Batch,
+        seats: NDArray[np.int64],
+        device: torch.device | str | None = None,
+    ) -> TorchActionInfo:
+        """Materialize action masks for one selected seat per environment."""
+
+        environments = batch.active_units.shape[0]
+        if seats.shape != (environments,):
+            raise ValueError(f"seats must have shape ({environments},)")
+        if np.any((seats < 0) | (seats > 1)):
+            raise ValueError("seats must contain only 0 or 1")
+        games = np.arange(environments, dtype=np.int64)
+        masks = batch.mask_views
+        action_info = cls(
+            unit_operation_mask=torch.from_numpy(masks.unit_ops[games, seats]),
+            unit_argument_mask=torch.from_numpy(masks.unit_args[games, seats]),
+            active_workers=torch.from_numpy(batch.active_units[games, seats]),
         )
         return action_info if device is None else action_info.to_device(device)
 

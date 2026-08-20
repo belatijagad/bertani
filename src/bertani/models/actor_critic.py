@@ -88,6 +88,9 @@ class ActorCritic(nn.Module):
         worker_temperature: float | None = None,
         workforce_temperature: float | None = None,
         omit_value: bool = False,
+        operations: torch.Tensor | None = None,
+        arguments: torch.Tensor | None = None,
+        target_hands: torch.Tensor | None = None,
     ) -> ActorCriticOutput:
         encoded_map = self.encoder(observation)
         operation_log_probs, argument_log_probs, operations, arguments = (
@@ -96,10 +99,14 @@ class ActorCritic(nn.Module):
                 observation,
                 action_info,
                 worker_temperature,
+                operations=operations,
+                arguments=arguments,
             )
         )
         workforce_log_probs, target_hands = self.workforce_head(
-            encoded_map, workforce_temperature
+            encoded_map,
+            workforce_temperature,
+            target_hands=target_hands,
         )
         value = (
             torch.zeros(
