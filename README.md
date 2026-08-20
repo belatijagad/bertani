@@ -80,6 +80,12 @@ policy keeps one planting lane open when at least eight seed-backed jobs are
 waiting, while urgency bands 12 and above retain the whole workforce. See
 [the rule-based agent architecture](docs/rule-based-agent.md).
 
+The first learned-policy scaffold follows the same separation. It encodes both
+farms once with a residual CNN, gathers the contextual map at every active
+worker, and applies one parameter-shared worker head with operation and item
+masks. A separate workforce head predicts the target hand count. See
+[the neural baseline architecture](docs/neural-agent.md).
+
 Run validation with:
 
 ```bash

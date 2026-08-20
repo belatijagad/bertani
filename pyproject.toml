@@ -14,6 +14,11 @@ dependencies = [
     "numpy>=2.0",
 ]
 
+[project.optional-dependencies]
+rl = [
+    "torch>=2.7",
+]
+
 [project.scripts]
 bertani = "bertani:main"
 
