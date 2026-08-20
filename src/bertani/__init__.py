@@ -6,15 +6,6 @@ from .opening import (
     OpeningDiagnostics,
     OpeningTurn,
 )
-from .vec_env import (
-    Batch,
-    Item,
-    MarketOp,
-    MaskViews,
-    ObservationViews,
-    UnitOp,
-    VecEnv,
-)
 from .rule_based import (
     RuleActions,
     RuleConfig,
@@ -34,6 +25,16 @@ from .tasks import (
     WorkforcePlanner,
     WorkRole,
     WorkZone,
+)
+from .v9_opponent import V9CacheStats, V9OpponentPolicy, V9SelfPlayEnv
+from .vec_env import (
+    Batch,
+    Item,
+    MarketOp,
+    MaskViews,
+    ObservationViews,
+    UnitOp,
+    VecEnv,
 )
 
 __all__ = [
@@ -58,13 +59,16 @@ __all__ = [
     "TaskKind",
     "TaskRule",
     "TaskScheduler",
-    "WorkforcePlan",
-    "WorkforcePlanner",
-    "WorkRole",
-    "WorkZone",
     "UnitOp",
+    "V9CacheStats",
+    "V9OpponentPolicy",
+    "V9SelfPlayEnv",
     "VecEnv",
     "VectorRulePolicy",
+    "WorkRole",
+    "WorkZone",
+    "WorkforcePlan",
+    "WorkforcePlanner",
 ]
 
 

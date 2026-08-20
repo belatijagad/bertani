@@ -9,18 +9,19 @@ submission packaging.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
+import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-import sys
+from types import ModuleType
 from typing import Any
-import uuid
 
 import numpy as np
 
 from .rule_based import RuleActions
 from .vec_env import Batch, Item, MarketOp, UnitOp, VecEnv
-
 
 Agent = Callable[..., dict[str, object]]
 ITEM_NAMES = tuple(item.name for item in Item)
@@ -40,8 +41,8 @@ SHOP_NAMES = (
 )
 
 
-def load_agent_file(path: Path) -> Agent:
-    """Load an isolated submission module and return its ``agent`` callable."""
+def load_agent_module(path: Path) -> ModuleType:
+    """Load an isolated submission module without leaking its GC preference."""
 
     resolved = path.resolve()
     if not resolved.is_file():
@@ -53,11 +54,25 @@ def load_agent_file(path: Path) -> Agent:
         raise ImportError(f"cannot load agent module: {resolved}")
     module = importlib.util.module_from_spec(spec)
     module_directory = str(resolved.parent)
+    gc_was_enabled = gc.isenabled()
     sys.path.insert(0, module_directory)
     try:
         spec.loader.exec_module(module)
     finally:
         sys.path.remove(module_directory)
+        # Some preserved competition agents disable cyclic collection to avoid
+        # inference jitter. That process-global choice must not leak into a PPO
+        # trainer which creates longer-lived Python and Torch object graphs.
+        if gc_was_enabled and not gc.isenabled():
+            gc.enable()
+    return module
+
+
+def load_agent_file(path: Path) -> Agent:
+    """Load an isolated submission module and return its ``agent`` callable."""
+
+    resolved = path.resolve()
+    module = load_agent_module(resolved)
     agent = getattr(module, "agent", None)
     if not callable(agent):
         raise TypeError(f"{resolved} does not define a callable agent")
@@ -95,23 +110,35 @@ def _tile(snapshot: Mapping[str, object]) -> object:
 
 
 def snapshot_observation(
-    snapshot: Mapping[str, object], seat: int
+    snapshot: Mapping[str, object],
+    seat: int,
+    *,
+    include_opponent: bool = True,
 ) -> dict[str, object]:
-    """Convert one native state snapshot to a seat's public observation."""
+    """Convert one native state snapshot to a seat's public observation.
+
+    ``include_opponent=False`` keeps the opponent's public scalars and units but
+    omits its tile conversion. It is an internal fast path for policies, such as
+    V9's normal R9 branch, that provably inspect only their own farm.
+    """
 
     if seat not in (0, 1):
         raise ValueError("seat must be 0 or 1")
     farms_raw = list(snapshot["farms"])
     farms: list[dict[str, object]] = []
-    for raw in farms_raw:
+    for farm_index, raw in enumerate(farms_raw):
         farm = dict(raw)
         farms.append(
             {
                 "money": farm["money"],
-                "tiles": [
-                    [_tile(tile) for tile in row]
-                    for row in farm["tiles"]
-                ],
+                "tiles": (
+                    [
+                        [_tile(tile) for tile in row]
+                        for row in farm["tiles"]
+                    ]
+                    if include_opponent or farm_index == seat
+                    else []
+                ),
                 "farmer": list(farm["farmer"]),
                 "hands": [list(position) for position in farm["hands"]],
                 "unlocked_quadrants": [
@@ -143,7 +170,7 @@ def snapshot_observation(
                 list(market_raw["inventory"]), PRODUCT_NAMES
             ),
             "prices": {
-                name: int(round(float(list(market_raw["prices"])[index])))
+                name: round(float(list(market_raw["prices"])[index]))
                 for index, name in enumerate(PRODUCT_NAMES)
             },
         },
@@ -248,5 +275,6 @@ class NativeFileAgentPolicy:
 __all__ = [
     "NativeFileAgentPolicy",
     "load_agent_file",
+    "load_agent_module",
     "snapshot_observation",
 ]

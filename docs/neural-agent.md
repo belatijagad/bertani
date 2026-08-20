@@ -69,3 +69,34 @@ joint_log_probs = output.joint_log_probs(action_info.active_workers)
 environment overwrites its NumPy buffers on every step. For a high-throughput
 trainer, preallocate device staging buffers and copy into them asynchronously
 instead of retaining these convenience objects across steps.
+
+## Frozen V9 rollout opponent
+
+Use `V9SelfPlayEnv` to train against `references/v9_main_restarted.py`. The
+wrapper alternates learner seats across vector slots and accepts compact
+learner-only action tensors; it inserts V9 into the other seat before stepping
+the native environment.
+
+```python
+import numpy as np
+
+from bertani import V9SelfPlayEnv, VecEnv
+
+environment = VecEnv(128, auto_reset=True)
+self_play = V9SelfPlayEnv.from_path(environment)
+batch = self_play.reset()
+
+# Learner output only: [environment, worker, (operation, argument, count)].
+learner_actions = np.zeros(
+    (environment.num_envs, environment.max_units, 3), dtype=np.int64
+)
+batch = self_play.step(learner_actions)
+rewards = self_play.learner_rewards()
+```
+
+V9 is a 22 MB replay ensemble whose decoded Python bank is much larger. The
+adapter imports that bank once, keeps only its small trajectory state per
+environment, restores Python cyclic garbage collection after import, reuses the
+native action buffers, and caches identical states within a vector step. Do not
+instantiate one V9 module per environment or put `NativeFileAgentPolicy` in the
+PPO hot loop.
