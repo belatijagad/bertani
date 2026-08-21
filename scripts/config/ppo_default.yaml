@@ -35,7 +35,8 @@ env_config:
   seed: 2026
 
 self_play_config:
-  opponent_path: references/v9_main_restarted.py
+  opponent: v16
+  opponent_path: baselines/v16_rc5/main.py
   # margin_delta, terminal_margin, or win_loss
   reward: margin_delta
   # rule-scaffold or workforce-only
@@ -51,10 +52,10 @@ rl_model_config:
 
 # Runtime and outputs. Relative paths resolve from the repository root.
 device: cuda
-checkpoint_path: outputs/ppo/latest.pt
+checkpoint_path: outputs/ppo-v16/latest.pt
 resume: null
 checkpoint_every: 25
-metrics_file: outputs/ppo/metrics.jsonl
+metrics_file: outputs/ppo-v16/metrics.jsonl
 progress: true
 profile: false
 cprofile: null

@@ -170,6 +170,10 @@ def test_collect_and_update_ppo_smoke() -> None:
 
     assert rollout.rewards.shape == (2, 2)
     assert rollout.values.shape == (3, 2)
+    assert rollout.actions.operations.dtype == torch.int16
+    assert rollout.actions.arguments.dtype == torch.int16
+    assert rollout.actions.target_hands.dtype == torch.int16
+    assert rollout.observation.worker_positions.dtype == torch.int16
     assert collection.profile.transitions == 4
     assert collection.profile.total_seconds > 0.0
     assert collection.profile.policy_forward_seconds > 0.0

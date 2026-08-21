@@ -14,14 +14,15 @@ DEFAULT_CONFIG = ROOT / "scripts" / "config" / "ppo_default.yaml"
 def test_default_ppo_experiment_config_loads_all_sections() -> None:
     config = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
 
-    assert config.max_updates == 1_000
+    assert config.max_updates > 0
     # Experiment-scale knobs are intentionally edited in this file between
     # runs; this test verifies they parse instead of pinning one machine size.
     assert config.n_envs > 0
     assert config.ppo.steps_per_update > 0
     assert config.ppo.minibatch_size > 0
     assert config.reward is RewardMode.MARGIN_DELTA
-    assert config.opponent_path == ROOT / "references" / "v9_main_restarted.py"
+    assert config.opponent == "v16"
+    assert config.opponent_path == ROOT / "baselines" / "v16_rc5" / "main.py"
     assert config.ppo.learning_rate == 1e-4
     assert config.ppo.adam_epsilon == 3e-4
     assert config.ppo.max_gradient_norm == 10.0

@@ -11,6 +11,7 @@ mod route_scheduler;
 mod rule_features;
 mod scheduler_controller;
 mod snapshot;
+mod v16_opponent;
 mod vec_env;
 mod workforce;
 
@@ -20,6 +21,9 @@ use pyo3::prelude::*;
 mod _rust {
     #[pymodule_export]
     use super::vec_env::NativeVecEnv;
+
+    #[pymodule_export]
+    use super::v16_opponent::NativeV16Opponent;
 
     #[pymodule_export]
     use super::executor::execute_assignments;

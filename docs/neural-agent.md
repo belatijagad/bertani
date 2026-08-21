@@ -70,7 +70,30 @@ environment overwrites its NumPy buffers on every step. For a high-throughput
 trainer, preallocate device staging buffers and copy into them asynchronously
 instead of retaining these convenience objects across steps.
 
-## Frozen V9 rollout opponent
+Categorical action IDs and worker coordinates are stored and transferred as
+`int16`. The model widens only the minibatch values required by PyTorch
+indexing to `int64`. The simulator action ABI remains `int64`, because order
+quantities are general game-state values rather than small categorical IDs.
+
+## Frozen rollout opponents
+
+PPO defaults to the batched V16-RC5 opponent. Its fixed expert trace, weed
+repair, and market front-running run in an independent Rust module over typed
+simulator state, making it appropriate for high-throughput pure-RL experiments.
+Select it in YAML with
+`opponent: v16` and `opponent_path: baselines/v16_rc5/main.py`.
+
+V16 is intentionally isolated from both neural encoding and rule planning:
+
+- `crates/bertani-python/src/v16_opponent.rs` owns native V16 execution/state
+- `src/bertani/v16/trace.py` only loads and encodes the preserved trace
+- `src/bertani/v16/opponent.py` is the thin Python/native boundary
+- `src/bertani/actions.py` owns the policy-neutral action tensor container
+- `src/bertani/self_play.py` composes any opponent with the learner
+
+Removing the rule-based package therefore does not require changing V16.
+
+V9 remains available for harder evaluation and later curriculum stages.
 
 Use `V9SelfPlayEnv` to train against `references/v9_main_restarted.py`. The
 wrapper alternates learner seats across vector slots and accepts compact
@@ -153,15 +176,15 @@ optimizer-minibatch bars. The active phase is shown explicitly, with rollout
 and training throughput, loss, and recent win rate in the main postfix. Disable
 the bars for batch jobs with `--no-progress`.
 
-Every update is also appended as JSON to `outputs/ppo/metrics.jsonl`. Metrics
+Every update is also appended as JSON to `outputs/ppo-v16/metrics.jsonl`. Metrics
 include:
 
 - Observation packing, device transfer, neural forward, and action transfer
-- Rule-market generation, V9 inference, action composition, and Rust stepping
+- Rule-market generation, opponent inference, action composition, and Rust stepping
 - PPO preparation, device transfer, forward, backward, and optimizer time
 - Rollout and optimization throughput
 - Win/tie/loss counts, final margin, explained variance, KL, and clip fraction
-- V9 cache deltas, process RSS, and CUDA memory
+- Opponent cache deltas, process RSS, and CUDA memory
 
 CUDA launches are asynchronous during normal training. Pass `--profile` to
 synchronize at timing boundaries and obtain accurate component timings; this
@@ -176,6 +199,6 @@ uv run python scripts/train_ppo.py \
 uv run python -m pstats outputs/ppo/training.prof
 ```
 
-The V9 and environment timers surround the Python/Rust boundary separately,
+The opponent and environment timers surround the policy/native boundary separately,
 which makes it straightforward to tell whether an optimization belongs in the
 replay policy adapter, tensor preparation, or native simulator.

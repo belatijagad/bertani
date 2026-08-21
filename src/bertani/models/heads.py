@@ -131,8 +131,10 @@ class WorkerActorHead(nn.Module):
             .unsqueeze(-1)
             .expand(-1, workers)
         )
-        x = worker_positions[..., 0]
-        y = worker_positions[..., 1]
+        # Rollout storage keeps tiny coordinates as int16. PyTorch indexing
+        # requires long, so widen only at the gather boundary.
+        x = worker_positions[..., 0].long()
+        y = worker_positions[..., 1].long()
         return encoded_map[batch_indices, :, y, x]
 
 

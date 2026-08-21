@@ -92,6 +92,14 @@ class ActorCritic(nn.Module):
         arguments: torch.Tensor | None = None,
         target_hands: torch.Tensor | None = None,
     ) -> ActorCriticOutput:
+        # Sampled categorical IDs are stored/transferred as int16. Gather and
+        # categorical indexing require int64, but only during this forward.
+        if operations is not None:
+            operations = operations.long()
+        if arguments is not None:
+            arguments = arguments.long()
+        if target_hands is not None:
+            target_hands = target_hands.long()
         encoded_map = self.encoder(observation)
         operation_log_probs, argument_log_probs, operations, arguments = (
             self.worker_head(

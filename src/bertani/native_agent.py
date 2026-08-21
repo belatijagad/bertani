@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from .rule_based import RuleActions
+from .actions import ActionBatch
 from .vec_env import Batch, Item, MarketOp, UnitOp, VecEnv
 
 Agent = Callable[..., dict[str, object]]
@@ -216,7 +216,7 @@ class NativeFileAgentPolicy:
         self.configuration = dict(configuration)
         self.max_orders = max_orders
         self._shape: tuple[int, int, int] | None = None
-        self._actions: RuleActions | None = None
+        self._actions: ActionBatch | None = None
 
     def act(
         self,
@@ -224,7 +224,7 @@ class NativeFileAgentPolicy:
         batch: Batch,
         *,
         seat_mask: np.ndarray[Any, np.dtype[np.bool_]],
-    ) -> RuleActions:
+    ) -> ActionBatch:
         """Call the file agent for each selected environment and seat."""
 
         actions = self._buffers(batch)
@@ -255,11 +255,11 @@ class NativeFileAgentPolicy:
                 )
         return actions
 
-    def _buffers(self, batch: Batch) -> RuleActions:
+    def _buffers(self, batch: Batch) -> ActionBatch:
         shape = batch.active_units.shape
         if self._actions is None or self._shape != shape:
             environments, players, units = shape
-            self._actions = RuleActions(
+            self._actions = ActionBatch(
                 unit_actions=np.zeros(
                     (environments, players, units, 3), dtype=np.int64
                 ),

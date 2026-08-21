@@ -28,7 +28,7 @@ class TorchObservation(NamedTuple):
     workers: torch.Tensor
     """Float tensor shaped ``[batch * players, max_units, 29]``."""
     worker_positions: torch.Tensor
-    """Long tensor shaped ``[batch * players, max_units, 2]``."""
+    """Int16 tensor shaped ``[batch * players, max_units, 2]``."""
 
     @classmethod
     def from_batch(
@@ -125,7 +125,9 @@ class TorchObservation(NamedTuple):
         # rows may contain placeholder values; force them to the harmless
         # origin before the actor gathers from the spatial map.
         active = torch.from_numpy(active_units).reshape(flat_batch, -1)
-        positions = torch.round(workers[..., 2:4] * float(board - 1)).long()
+        positions = torch.round(
+            workers[..., 2:4] * float(board - 1)
+        ).to(torch.int16)
         positions = positions.clamp(0, board - 1)
         positions = torch.where(active.unsqueeze(-1), positions, 0)
 

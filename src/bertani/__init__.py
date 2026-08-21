@@ -1,5 +1,6 @@
 """Fast Rust tooling for the Kaggriculture reinforcement-learning competition."""
 
+from .actions import ActionBatch
 from .market import MarketPlanBatch, MarketRule
 from .opening import (
     OpeningController,
@@ -14,6 +15,7 @@ from .rule_based import (
     StrategicIntent,
     VectorRulePolicy,
 )
+from .self_play import SelfPlayEnv
 from .tasks import (
     TaskAssignments,
     TaskBatch,
@@ -26,6 +28,7 @@ from .tasks import (
     WorkRole,
     WorkZone,
 )
+from .v16 import V16CacheStats, V16OpponentPolicy
 from .v9_opponent import V9CacheStats, V9OpponentPolicy, V9SelfPlayEnv
 from .vec_env import (
     Batch,
@@ -39,6 +42,7 @@ from .vec_env import (
 
 __all__ = [
     "Batch",
+    "ActionBatch",
     "Item",
     "MarketOp",
     "MarketPlanBatch",
@@ -60,6 +64,9 @@ __all__ = [
     "TaskRule",
     "TaskScheduler",
     "UnitOp",
+    "SelfPlayEnv",
+    "V16CacheStats",
+    "V16OpponentPolicy",
     "V9CacheStats",
     "V9OpponentPolicy",
     "V9SelfPlayEnv",

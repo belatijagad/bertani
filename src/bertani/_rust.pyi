@@ -103,3 +103,23 @@ class NativeVecEnv:
         output: NDArray[np.uint64],
     ) -> None: ...
     def terminal_snapshot(self, index: int) -> dict[str, Any] | None: ...
+
+
+class NativeV16Opponent:
+    def __init__(
+        self,
+        trace_units: NDArray[np.int16],
+        trace_market: NDArray[np.int16],
+        trace_market_lengths: NDArray[np.int16],
+    ) -> None: ...
+
+    def reset(self) -> None: ...
+
+    def act_into(
+        self,
+        environment: NativeVecEnv,
+        seats: NDArray[np.int64],
+        unit_actions: NDArray[np.int16],
+        market_actions: NDArray[np.int16],
+        market_lengths: NDArray[np.int16],
+    ) -> None: ...

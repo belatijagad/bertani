@@ -1,4 +1,4 @@
-"""Trajectory collection against the frozen V9 self-play wrapper."""
+"""Trajectory collection against a frozen batched self-play opponent."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from ..models import ActorCritic, TorchActionInfo, TorchObservation
-from ..v9_opponent import V9SelfPlayEnv
+from ..self_play import SelfPlayEnv
 from .config import PPOConfig
 from .market import LearnerMarketPolicy
 from .rewards import CompetitiveReward
@@ -42,13 +42,13 @@ class RolloutProfile:
     policy_forward_seconds: float
     action_transfer_seconds: float
     market_seconds: float
-    v9_seconds: float
+    opponent_seconds: float
     action_composition_seconds: float
     environment_seconds: float
     reward_seconds: float
     transitions: int
-    v9_cache_hits: int
-    v9_cache_misses: int
+    opponent_cache_hits: int
+    opponent_cache_misses: int
     synchronized: bool
 
     @property
@@ -70,7 +70,7 @@ def _synchronize(device: torch.device, enabled: bool) -> None:
 
 @torch.no_grad()
 def collect_rollout(
-    self_play: V9SelfPlayEnv,
+    self_play: SelfPlayEnv,
     model: ActorCritic,
     market_policy: LearnerMarketPolicy,
     reward: CompetitiveReward,
@@ -96,7 +96,7 @@ def collect_rollout(
         "policy_forward": 0.0,
         "action_transfer": 0.0,
         "market": 0.0,
-        "v9": 0.0,
+        "opponent": 0.0,
         "composition": 0.0,
         "environment": 0.0,
         "reward": 0.0,
@@ -149,7 +149,7 @@ def collect_rollout(
                 output.target_hands.unsqueeze(-1),
             ),
             dim=-1,
-        ).cpu()
+        ).to(torch.int16).cpu()
         unit_action_tensor = packed_actions[:, :-1].reshape_as(device_unit_actions)
         sampled_actions = PPOActions(
             unit_action_tensor[..., 0],
@@ -173,7 +173,7 @@ def collect_rollout(
             learner_market_lengths,
         )
         step_profile = self_play.last_step_profile
-        timings["v9"] += step_profile.opponent_seconds
+        timings["opponent"] += step_profile.opponent_seconds
         timings["composition"] += step_profile.composition_seconds
         timings["environment"] += step_profile.environment_seconds
 
@@ -265,13 +265,13 @@ def collect_rollout(
             policy_forward_seconds=timings["policy_forward"],
             action_transfer_seconds=timings["action_transfer"],
             market_seconds=timings["market"],
-            v9_seconds=timings["v9"],
+            opponent_seconds=timings["opponent"],
             action_composition_seconds=timings["composition"],
             environment_seconds=timings["environment"],
             reward_seconds=timings["reward"],
             transitions=config.steps_per_update * self_play.environment.num_envs,
-            v9_cache_hits=cache_after.hits - cache_before.hits,
-            v9_cache_misses=cache_after.misses - cache_before.misses,
+            opponent_cache_hits=cache_after.hits - cache_before.hits,
+            opponent_cache_misses=cache_after.misses - cache_before.misses,
             synchronized=config.profile,
         ),
     )

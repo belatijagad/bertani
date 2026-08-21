@@ -25,10 +25,10 @@ struct TerminalRecord {
 }
 
 #[derive(Clone, Debug)]
-struct Slot {
-    sim: Sim,
+pub(crate) struct Slot {
+    pub(crate) sim: Sim,
     base_seed: u64,
-    episode_id: u64,
+    pub(crate) episode_id: u64,
     terminal: Option<TerminalRecord>,
 }
 
@@ -137,7 +137,8 @@ impl VecEnvCore {
             .zip(seats.par_iter().copied())
             .zip(output.par_chunks_mut(6))
             .for_each(|((slot, seat), row)| {
-                let (state_a, state_b) = v9_state_fingerprint(&slot.sim.state, seat as usize);
+                let seat = usize::try_from(seat).unwrap_or_default();
+                let (state_a, state_b) = v9_state_fingerprint(&slot.sim.state, seat);
                 let (town_a, town_b) = v9_town_fingerprint(&slot.sim.state);
                 row.copy_from_slice(&[
                     state_a,
@@ -145,7 +146,7 @@ impl VecEnvCore {
                     town_a,
                     town_b,
                     u64::from(slot.sim.state.step),
-                    (1 + slot.sim.state.farms[seat as usize].hands.len()) as u64,
+                    (1 + slot.sim.state.farms[seat].hands.len()) as u64,
                 ]);
             });
         Ok(())
@@ -508,6 +509,10 @@ fn fingerprint_mix(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+const fn signed_bits(value: i64) -> u64 {
+    u64::from_ne_bytes(value.to_ne_bytes())
+}
+
 fn v9_town_fingerprint(state: &State) -> (u64, u64) {
     let mut hash = Fingerprint::new();
     hash.push(state.town.unlocked_shops.len() as u64);
@@ -517,6 +522,7 @@ fn v9_town_fingerprint(state: &State) -> (u64, u64) {
     hash.finish()
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
     const V9_ITEMS: [Item; 12] = [
         Item::Carrot,
@@ -553,7 +559,7 @@ fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
 
     let mut hash = Fingerprint::new();
     let farm = &state.farms[seat];
-    hash.push(farm.money.round_ties_even() as i64 as u64);
+    hash.push(signed_bits(farm.money.round_ties_even() as i64));
     hash.push((farm.farmer.x * 10 + farm.farmer.y) as u64);
     hash.push(farm.hands.len() as u64);
     for hand in &farm.hands {
@@ -563,14 +569,14 @@ fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
     hash.push(farm.private.inventories.len() as u64);
     for inventory in &farm.private.inventories {
         for item in V9_ITEMS {
-            hash.push(inventory.get(item) as u64);
+            hash.push(signed_bits(inventory.get(item)));
         }
     }
     for crop in V9_SEEDS {
-        hash.push(farm.private.seeds[crop.index()] as u64);
+        hash.push(signed_bits(farm.private.seeds[crop.index()]));
     }
     for item in V9_ITEMS {
-        hash.push(farm.private.shed[item.index()] as u64);
+        hash.push(signed_bits(farm.private.shed[item.index()]));
     }
 
     for tile in &farm.tiles {
@@ -581,12 +587,12 @@ fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
             Tile::Plant(plant) => {
                 hash.push(3);
                 hash.push(plant.crop as u64);
-                hash.push(plant.planted_day as i64 as u64);
+                hash.push(signed_bits(i64::from(plant.planted_day)));
                 hash.push(u64::from(plant.watered_today));
-                hash.push(plant.consecutive_unwatered as i64 as u64);
-                hash.push(plant.yield_units as u64);
-                hash.push(plant.max_lifespan_step as u64);
-                hash.push(plant.fertilized_until_day as i64 as u64);
+                hash.push(signed_bits(i64::from(plant.consecutive_unwatered)));
+                hash.push(signed_bits(plant.yield_units));
+                hash.push(signed_bits(plant.max_lifespan_step));
+                hash.push(signed_bits(i64::from(plant.fertilized_until_day)));
             }
             Tile::Structure { kind, animal } => match kind {
                 // V9's tile signature intentionally treats every coop as the
@@ -598,12 +604,12 @@ fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
                         None => hash.push(u64::MAX),
                         Some(animal) => {
                             hash.push(animal.animal as u64);
-                            hash.push(animal.yield_units as u64);
-                            hash.push(animal.consecutive_unfed as i64 as u64);
+                            hash.push(signed_bits(animal.yield_units));
+                            hash.push(signed_bits(i64::from(animal.consecutive_unfed)));
                             hash.push(u64::from(animal.fed_today));
                             hash.push(u64::from(animal.cared_today));
                             hash.push(u64::from(animal.fertilizer_available));
-                            hash.push(animal.pending_care_bonus as u64);
+                            hash.push(signed_bits(animal.pending_care_bonus));
                         }
                     }
                 }
@@ -612,7 +618,7 @@ fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
     }
 
     for product in V9_PRICES {
-        hash.push(state.market.prices[product.index()] as i64 as u64);
+        hash.push(signed_bits(state.market.prices[product.index()] as i64));
     }
     hash.push(farm.unlocked_quadrants.len() as u64);
     hash.finish()
@@ -633,6 +639,20 @@ fn require_len(name: &str, actual: usize, expected: usize) -> Result<(), String>
 #[pyclass(module = "bertani._rust")]
 pub struct NativeVecEnv {
     core: VecEnvCore,
+}
+
+impl NativeVecEnv {
+    pub(crate) fn slots(&self) -> &[Slot] {
+        &self.core.slots
+    }
+
+    pub(crate) const fn max_units_native(&self) -> usize {
+        self.core.max_units
+    }
+
+    pub(crate) const fn max_orders_native(&self) -> usize {
+        self.core.max_orders
+    }
 }
 
 #[pymethods]

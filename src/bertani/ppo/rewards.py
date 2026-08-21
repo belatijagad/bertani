@@ -1,4 +1,4 @@
-"""Competitive rewards for a learner playing frozen V9."""
+"""Competitive rewards for a learner playing a frozen opponent."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from enum import StrEnum
 import numpy as np
 import torch
 
-from ..v9_opponent import V9SelfPlayEnv
+from ..self_play import SelfPlayEnv
 from ..vec_env import Batch
 
 
@@ -32,10 +32,10 @@ class CompetitiveReward:
         self.starting_money = starting_money
         self._margin: np.ndarray | None = None
 
-    def reset(self, self_play: V9SelfPlayEnv, batch: Batch) -> None:
+    def reset(self, self_play: SelfPlayEnv, batch: Batch) -> None:
         self._margin = self._observation_margin(self_play, batch)
 
-    def transition(self, self_play: V9SelfPlayEnv, batch: Batch) -> torch.Tensor:
+    def transition(self, self_play: SelfPlayEnv, batch: Batch) -> torch.Tensor:
         if self._margin is None:
             raise RuntimeError("reward must be reset before its first transition")
         games = self_play.games
@@ -64,7 +64,7 @@ class CompetitiveReward:
 
     @staticmethod
     def _observation_margin(
-        self_play: V9SelfPlayEnv, batch: Batch
+        self_play: SelfPlayEnv, batch: Batch
     ) -> np.ndarray:
         farms = batch.observation_views.farms
         games = self_play.games

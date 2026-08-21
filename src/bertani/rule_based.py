@@ -17,6 +17,8 @@ import time
 import numpy as np
 from numpy.typing import NDArray
 
+from .actions import ActionBatch
+
 try:
     from ._rust import extract_rule_features as _native_extract_rule_features
 except (ImportError, ModuleNotFoundError):
@@ -113,13 +115,9 @@ class StrategicIntent:
     liquidate: NDArray[np.bool_]
 
 
-@dataclass(frozen=True, slots=True)
-class RuleActions:
-    """Reusable action buffers compatible with :meth:`VecEnv.step`."""
-
-    unit_actions: Int64Array
-    market_actions: Int64Array
-    market_lengths: Int64Array
+# Compatibility alias. The container is policy-neutral and no longer owned by
+# the rule-based subsystem.
+RuleActions = ActionBatch
 
 
 def extract_rule_features(

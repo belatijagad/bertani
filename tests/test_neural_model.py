@@ -63,7 +63,7 @@ def test_batch_adapter_matches_the_vector_environment_layout() -> None:
         12,
     )
     assert action_info.active_workers.shape == (4, env.max_units)
-    assert observation.worker_positions.dtype == torch.int64
+    assert observation.worker_positions.dtype == torch.int16
     assert action_info.active_workers.dtype == torch.bool
 
 

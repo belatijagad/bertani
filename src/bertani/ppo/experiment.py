@@ -19,6 +19,7 @@ class PPOExperimentConfig:
     n_envs: int
     seed: int
     device: str
+    opponent: str
     opponent_path: Path
     reward: RewardMode
     market: str
@@ -44,6 +45,8 @@ class PPOExperimentConfig:
                 raise ValueError(f"{name} must be positive")
         if self.market not in {"rule-scaffold", "workforce-only"}:
             raise ValueError("market must be rule-scaffold or workforce-only")
+        if self.opponent not in {"v9", "v16"}:
+            raise ValueError("opponent must be v9 or v16")
 
 
 def _mapping(value: object, name: str) -> dict[str, Any]:
@@ -137,7 +140,7 @@ def load_experiment_config(
     self_play = _mapping(raw["self_play_config"], "self_play_config")
     _exact_fields(
         self_play,
-        {"opponent_path", "reward", "market", "max_hires_per_turn"},
+        {"opponent", "opponent_path", "reward", "market", "max_hires_per_turn"},
         "self_play_config",
     )
     model_values = _mapping(raw["rl_model_config"], "rl_model_config")
@@ -181,6 +184,7 @@ def load_experiment_config(
         n_envs=int(environment["n_envs"]),
         seed=int(environment["seed"]),
         device=str(raw["device"]),
+        opponent=str(self_play["opponent"]),
         opponent_path=_path(
             self_play["opponent_path"], root, "self_play_config.opponent_path"
         ),

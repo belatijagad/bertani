@@ -16,7 +16,7 @@ import numpy as np
 
 from bertani import VecEnv
 from bertani.native_agent import NativeFileAgentPolicy, load_agent_file
-from bertani.v16_native import NativeV16Policy, load_v16_actions
+from bertani.v16 import V16OpponentPolicy
 from bertani_rules.agent import build_policy
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,8 +117,8 @@ def run_native_batch(
             },
             max_orders=environment.max_orders,
         )
-    v16 = NativeV16Policy(
-        load_v16_actions(Path(baseline)),
+    v16 = V16OpponentPolicy.from_path(
+        Path(baseline),
         max_orders=environment.max_orders,
     )
     v16.reset()
@@ -149,7 +149,7 @@ def run_native_batch(
             rule_ns += time.perf_counter_ns() - started
 
             started = time.perf_counter_ns()
-            v16_actions = v16.act(batch)
+            v16_actions = v16.act(environment, batch, seats=v16_seats)
             v16_ns += time.perf_counter_ns() - started
         else:
             if agent_path is None:
@@ -162,7 +162,7 @@ def run_native_batch(
                 rule_actions = candidate.act(
                     environment, batch, seat_mask=rule_seat_mask
                 )
-            v16_actions = v16.act(batch)
+            v16_actions = v16.act(environment, batch, seats=v16_seats)
 
         unit_actions[games, rule_seats] = rule_actions.unit_actions[
             games, rule_seats

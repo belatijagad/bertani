@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the baseline actor-critic against frozen v9_main_restarted."""
+"""Train the baseline actor-critic against a frozen batched opponent."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from bertani import V9SelfPlayEnv, VecEnv
+from bertani import SelfPlayEnv, V16OpponentPolicy, V9SelfPlayEnv, VecEnv
 from bertani.models import ActorCriticConfig, build_actor_critic
 from bertani.ppo import (
     CompetitiveReward,
@@ -58,7 +58,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default=experiment.device)
     parser.add_argument("--seed", type=int, default=experiment.seed)
-    parser.add_argument("--v9", type=Path, default=experiment.opponent_path)
+    parser.add_argument(
+        "--opponent",
+        choices=("v9", "v16"),
+        default=experiment.opponent,
+    )
+    parser.add_argument(
+        "--opponent-path",
+        type=Path,
+        default=experiment.opponent_path,
+        help="Frozen opponent submission or trace file.",
+    )
+    parser.add_argument("--v9", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint", type=Path, default=experiment.checkpoint_path)
     parser.add_argument("--metrics-file", type=Path, default=experiment.metrics_file)
     parser.add_argument("--resume", type=Path, default=experiment.resume)
@@ -105,6 +116,9 @@ def parse_args() -> argparse.Namespace:
         default=experiment.progress,
     )
     args = parser.parse_args()
+    if args.v9 is not None:
+        args.opponent = "v9"
+        args.opponent_path = args.v9
     args.ppo_config = replace(
         experiment.ppo,
         steps_per_update=args.steps_per_update,
@@ -186,7 +200,8 @@ def effective_experiment_config(
         "include_workforce": ppo_config.include_workforce,
         "env_config": {"n_envs": args.num_envs, "seed": args.seed},
         "self_play_config": {
-            "opponent_path": str(args.v9),
+            "opponent": args.opponent,
+            "opponent_path": str(args.opponent_path),
             "reward": args.reward.value,
             "market": args.market,
             "max_hires_per_turn": args.max_hires_per_turn,
@@ -224,7 +239,14 @@ def run(args: argparse.Namespace) -> None:
         trainer.updates = int(checkpoint["updates"])
 
     environment = VecEnv(args.num_envs, seed=args.seed, auto_reset=True)
-    self_play = V9SelfPlayEnv.from_path(environment, args.v9)
+    if args.opponent == "v16":
+        opponent = V16OpponentPolicy.from_path(
+            args.opponent_path,
+            max_orders=environment.max_orders,
+        )
+        self_play = SelfPlayEnv(environment, opponent)
+    else:
+        self_play = V9SelfPlayEnv.from_path(environment, args.opponent_path)
     generator = np.random.default_rng(args.seed)
     seeds = generator.integers(
         0,
@@ -328,7 +350,7 @@ def run(args: argparse.Namespace) -> None:
                 profile.policy_forward_seconds,
                 profile.action_transfer_seconds,
                 profile.market_seconds,
-                profile.v9_seconds,
+                profile.opponent_seconds,
                 profile.action_composition_seconds,
                 profile.environment_seconds,
                 profile.reward_seconds,
@@ -357,7 +379,7 @@ def run(args: argparse.Namespace) -> None:
             "rollout/policy_forward_seconds": profile.policy_forward_seconds,
             "rollout/action_transfer_seconds": profile.action_transfer_seconds,
             "rollout/market_seconds": profile.market_seconds,
-            "rollout/v9_seconds": profile.v9_seconds,
+            "rollout/opponent_seconds": profile.opponent_seconds,
             "rollout/action_composition_seconds": (profile.action_composition_seconds),
             "rollout/environment_seconds": profile.environment_seconds,
             "rollout/reward_seconds": profile.reward_seconds,
@@ -365,8 +387,8 @@ def run(args: argparse.Namespace) -> None:
                 profile.total_seconds - rollout_attributed, 0.0
             ),
             "rollout/profile_synchronized": profile.synchronized,
-            "v9/cache_hits": profile.v9_cache_hits,
-            "v9/cache_misses": profile.v9_cache_misses,
+            "opponent/cache_hits": profile.opponent_cache_hits,
+            "opponent/cache_misses": profile.opponent_cache_misses,
             "episodes/completed": episodes.completed,
             "episodes/wins": episodes.wins,
             "episodes/ties": episodes.ties,
