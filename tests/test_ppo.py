@@ -6,7 +6,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("bertani._rust", reason="the maturin extension has not been built")
 
-from bertani import MarketOp, RuleActions, V9SelfPlayEnv, VecEnv
+from bertani import ActionBatch, MarketOp, SelfPlayEnv, VecEnv
 from bertani.models import (
     ActorCriticConfig,
     TorchActionInfo,
@@ -34,7 +34,7 @@ class _PassOpponent:
 
     def act(
         self, environment: VecEnv, batch: object, *, seats: np.ndarray
-    ) -> RuleActions:
+    ) -> ActionBatch:
         del batch, seats
         units = np.zeros(
             (environment.num_envs, 2, environment.max_units, 3), dtype=np.int64
@@ -43,7 +43,7 @@ class _PassOpponent:
             (environment.num_envs, 2, environment.max_orders, 3), dtype=np.int64
         )
         lengths = np.zeros((environment.num_envs, 2), dtype=np.int64)
-        return RuleActions(units, market, lengths)
+        return ActionBatch(units, market, lengths)
 
 
 class _BaseMarket:
@@ -52,7 +52,7 @@ class _BaseMarket:
         batch: object,
         max_orders: int,
         seat_mask: np.ndarray,
-    ) -> RuleActions:
+    ) -> ActionBatch:
         del batch
         environments = seat_mask.shape[0]
         units = np.zeros((environments, 2, 1, 3), dtype=np.int64)
@@ -62,7 +62,7 @@ class _BaseMarket:
         market[games, seats, 0] = (MarketOp.HIRE, 0, 0)
         market[games, seats, 1] = (MarketOp.BUY_SEED, 0, 3)
         lengths[games, seats] = 2
-        return RuleActions(units, market, lengths)
+        return ActionBatch(units, market, lengths)
 
 
 def test_selected_seat_adapter_matches_flat_player_rows() -> None:
@@ -139,7 +139,7 @@ def test_collect_and_update_ppo_smoke() -> None:
         turns_per_day=3,
         weed_spawn_chance=0.0,
     )
-    self_play = V9SelfPlayEnv(
+    self_play = SelfPlayEnv(
         environment,
         _PassOpponent(environment),  # type: ignore[arg-type]
     )
@@ -203,7 +203,7 @@ def test_cuda_update_uses_gpu_optimized_layout_and_rollout_preload() -> None:
         turns_per_day=3,
         weed_spawn_chance=0.0,
     )
-    self_play = V9SelfPlayEnv(
+    self_play = SelfPlayEnv(
         environment,
         _PassOpponent(environment),  # type: ignore[arg-type]
     )

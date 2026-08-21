@@ -29,7 +29,6 @@ from .opening import OpeningController, OpeningDiagnostics
 from .tasks import (
     TaskAssignments,
     TaskBatch,
-    TaskExecutor,
     TaskRule,
     TaskScheduler,
     WorkforcePlanner,
@@ -59,9 +58,6 @@ class RuleConfig:
     starting_money: int = 3_000
     shed_capacity: int = 100
     liquidation_days: int = 0
-    opening_crop_targets: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
-    # GOOSE, COW, SHEEP order.
-    opening_animal_targets: tuple[int, int, int] = (0, 0, 0)
     town_shop_unlock_interval: int = 3
     town_shop_sell_interval: int = 4
     town_center_sell_interval: int = 24
@@ -113,11 +109,6 @@ class StrategicIntent:
     target_crop_counts: Int64Array
     target_animal_counts: Int64Array
     liquidate: NDArray[np.bool_]
-
-
-# Compatibility alias. The container is policy-neutral and no longer owned by
-# the rule-based subsystem.
-RuleActions = ActionBatch
 
 
 def extract_rule_features(
@@ -209,7 +200,6 @@ class VectorRulePolicy:
             "other_tasks": 0,
             "workforce": 0,
             "scheduler": 0,
-            "executor": 0,
             "market": 0,
         }
         self.intent_planner = intent_planner
@@ -219,11 +209,10 @@ class VectorRulePolicy:
         self.market_rules = () if market_rules is None else market_rules
         self.workforce_planner = workforce_planner
         self._task_scheduler: TaskScheduler | None = None
-        self._task_executor: TaskExecutor | None = None
         self.last_tasks: TaskBatch | None = None
         self.last_assignments: TaskAssignments | None = None
         self._shape: tuple[int, int, int, int] | None = None
-        self._actions: RuleActions | None = None
+        self._actions: ActionBatch | None = None
         self._features: RuleFeatures | None = None
         self.last_market_plan: MarketPlanBatch | None = None
 
@@ -254,7 +243,7 @@ class VectorRulePolicy:
         batch: Batch,
         max_orders: int = 10,
         seat_mask: NDArray[np.bool_] | None = None,
-    ) -> RuleActions:
+    ) -> ActionBatch:
         """Return legal local maintenance actions for an entire batch.
 
         Opening-only batches take a fast path around task generation. Outside
@@ -341,7 +330,6 @@ class VectorRulePolicy:
                 self.profile_ns[key] += time.perf_counter_ns() - started
 
         assert self._task_scheduler is not None
-        assert self._task_executor is not None
         started = time.perf_counter_ns() if self.profile else 0
         if self.workforce_planner is None:
             workforce = None
@@ -396,14 +384,13 @@ class VectorRulePolicy:
                 episode_steps=self.config.episode_steps,
                 turns_per_day=self.config.turns_per_day,
             )
-            self._task_executor = TaskExecutor(board_size)
         return self.last_tasks
 
-    def _action_buffers(self, batch: Batch, max_orders: int) -> RuleActions:
+    def _action_buffers(self, batch: Batch, max_orders: int) -> ActionBatch:
         n, players, units = batch.active_units.shape
         shape = (n, players, units, max_orders)
         if self._actions is None or self._shape != shape:
-            self._actions = RuleActions(
+            self._actions = ActionBatch(
                 unit_actions=np.zeros((n, players, units, 3), dtype=np.int64),
                 market_actions=np.zeros(
                     (n, players, max_orders, 3), dtype=np.int64
@@ -453,7 +440,6 @@ def animal_counts_total(animal_counts: Int64Array) -> Int64Array:
 
 
 __all__ = [
-    "RuleActions",
     "RuleConfig",
     "RuleFeatures",
     "RulePhase",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import NamedTuple
 
 import numpy as np
@@ -236,13 +235,3 @@ class TorchActionInfo(NamedTuple):
 
     def index(self, index: torch.Tensor | slice) -> TorchActionInfo:
         return TorchActionInfo(*(value[index] for value in self))
-
-
-def iter_tensors(
-    observation: TorchObservation,
-    action_info: TorchActionInfo,
-) -> Iterator[torch.Tensor]:
-    """Yield every input tensor; useful for device and shape assertions."""
-
-    yield from observation
-    yield from action_info

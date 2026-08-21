@@ -54,7 +54,6 @@ class SelfPlayEnv:
         self.games = np.arange(environment.num_envs, dtype=np.int64)
         self.learner_seats = self.games % 2
         self.opponent_seats = 1 - self.learner_seats
-        self.learner_flat_indices = 2 * self.games + self.learner_seats
         self._batch: Batch | None = None
         self.last_step_profile = SelfPlayStepProfile()
 

@@ -16,33 +16,30 @@ VecEnv Batch
     -> batched feature extraction
     -> StrategicIntent (rules now, learned planner later)
     -> TaskRule proposals
-    -> TaskScheduler assignments
-    -> masked TaskExecutor
+    -> fused TaskScheduler assignment and masked execution
     -> VecEnv action tensors
 ```
 
 `StrategicIntent` contains phase, hiring targets, cash and wheat reserves,
 crop/animal targets, and liquidation flags. `VectorRulePolicy` supplies a
-neutral no-op intent by default. V1 supplies its opening, midgame, workforce,
-production, reserve, and liquidation choices through `V1IntentPlanner`. A
-custom callable passed as `intent_planner=` changes strategy without replacing
-action legality and serialization. Version factories may offer
-`use_opening=False` to train or evaluate from the initial state.
+neutral no-op intent by default. The concrete strategy supplies its opening,
+midgame, workforce, production, reserve, and liquidation choices through
+`IntentPlanner`. A custom callable passed as `intent_planner=` changes strategy
+without replacing action legality and serialization. `build_policy()` accepts
+`use_opening=False` to train or evaluate without the opening.
 
-## Version boundaries
+## Strategy boundary
 
-All V1 decisions are colocated in `src/bertani_rules/v1.py`:
+All current decisions are colocated in `src/bertani_rules/agent.py`:
 
 - the 72-turn opening book and its pasture-recovery parameters;
 - phase, workforce, reserve, crop, animal, and liquidation targets;
 - maintenance, production, logistics, and market rule classes;
-- `build_policy()`, which composes V1 on the reusable engine.
+- `build_policy()`, which composes the strategy on the reusable engine.
 
 `src/bertani/` contains only reusable representations, feature extraction,
 opening-book execution, task arbitration, scheduling, action serialization,
-the Kaggle observation adapter, and the vector environment wrapper. A new
-version should copy `v1.py` to `v2.py` and change decisions there, without
-editing the abstraction package.
+the Kaggle observation adapter, and the vector environment wrapper.
 
 The opening controller owns steps 0–71 (days 0–2). Its nominal action book is
 the sequence observed in submission `55463512`, but it inspects the planned
@@ -66,11 +63,11 @@ contains:
 
 Rules may compete for the same tile. `TaskBatch.propose_tiles()` retains the
 highest-priority proposal, making arbitration independent of rule ordering when
-priorities differ. `TaskBatch.set_global()` adds named logistics tasks without
-inventing fake board tiles.
+priorities differ. Native task proposal kernels fill the extra logistics slots
+without inventing fake board tiles.
 
-The V1 strategy in `src/bertani_rules/v1.py` defines a
-`MaintenanceTaskRule` that proposes work in this priority order:
+The native maintenance portion of `FarmTaskRule` proposes work in this
+priority order:
 
 1. feed;
 2. harvest;
@@ -86,9 +83,9 @@ feed without persisting a brittle imperative script.
 `TaskScheduler` computes batched priority-minus-distance scores, checks required
 inventory, and then performs a small per-seat conflict-resolution loop. Each
 unit receives at most one task and exclusive tasks receive at most one unit.
-`TaskExecutor` handles Manhattan movement, local action masks, item arguments,
-and raw tensor serialization. This is the main extension seam: a new rule only
-needs to propose tasks.
+`TaskScheduler.assign_and_execute()` handles assignment, Manhattan movement,
+local action masks, item arguments, and raw tensor serialization in one native
+call. A new rule only needs to propose tasks.
 
 For example:
 
@@ -102,20 +99,21 @@ class BuildPastureRule:
             priority=250.0,
         )
 
-from bertani_rules.v1 import MaintenanceTaskRule
+from bertani_rules.agent import FarmTaskRule
 
-policy = VectorRulePolicy(task_rules=(MaintenanceTaskRule(), BuildPastureRule()))
+policy = VectorRulePolicy(task_rules=(FarmTaskRule(), BuildPastureRule()))
 ```
 
 The `intent` argument lets production rules respond to the current strategic
 targets without coupling those targets to movement or action encoding.
 
-V1's `ProductionTaskRule` fills the observed wheat/melon footprint after harvest,
-clears weeds that obstruct future production, and routes units carrying
-harvests or fertilizer back to the nearest shed access tile. One-time crops are
-harvested on their maximum-yield day rather than at first maturity.
+The production portion of `FarmTaskRule` fills the observed wheat/melon
+footprint after harvest, clears weeds that obstruct future production, and
+routes units carrying harvests or fertilizer back to the nearest shed access
+tile. One-time crops are harvested on their maximum-yield day rather than at
+first maturity.
 
-V1's `EconomyMarketRule` sells deposited products when their price is healthy or
+`EconomyMarketRule` sells deposited products when their price is healthy or
 the shed is under pressure, protects the livestock wheat reserve, buys missing
 feed and replacement seeds, and hires toward the daily workforce target. The
 executor sells every remaining shed product during liquidation.
@@ -141,7 +139,7 @@ Use it with the vector environment:
 
 ```python
 from bertani import VecEnv
-from bertani_rules.v1 import build_policy
+from bertani_rules.agent import build_policy
 
 env = VecEnv(num_envs=256, seed=11)
 policy = build_policy()  # Opening controller enabled by default.
@@ -159,18 +157,3 @@ while True:
 The action buffers are allocated once per batch shape and reused. `act()` must
 therefore be called again before each environment step, and callers must copy
 actions they need to retain.
-
-## Planned extensions
-
-The scaffold is not yet a competitive baseline. The next layers are:
-
-- livestock and land expansion rules driven by `StrategicIntent`;
-- animal placement and crop fertilization workflows;
-- deadline-aware scheduling when the current workforce cannot finish all work;
-- joint cash/item reservations across field tasks and market plans;
-- market-order construction from reserves, targets, prices, and remaining time;
-- batch benchmarks and replay comparisons against the observed opening.
-
-Those layers belong in the executor and rule planner respectively. A future
-neural policy should replace high-level intent or task scores first, while the
-deterministic executor continues to enforce action shape, masks, and logistics.

@@ -95,18 +95,29 @@ Removing the rule-based package therefore does not require changing V16.
 
 V9 remains available for harder evaluation and later curriculum stages.
 
-Use `V9SelfPlayEnv` to train against `references/v9_main_restarted.py`. The
-wrapper alternates learner seats across vector slots and accepts compact
-learner-only action tensors; it inserts V9 into the other seat before stepping
-the native environment.
+Compose `V9OpponentPolicy` with `SelfPlayEnv` to train against
+`references/v9_main_restarted.py`. The wrapper alternates learner seats across
+vector slots and accepts compact learner-only action tensors; it inserts V9
+into the other seat before stepping the native environment.
 
 ```python
 import numpy as np
 
-from bertani import V9SelfPlayEnv, VecEnv
+from bertani import SelfPlayEnv, V9OpponentPolicy, VecEnv
 
 environment = VecEnv(128, auto_reset=True)
-self_play = V9SelfPlayEnv.from_path(environment)
+opponent = V9OpponentPolicy.from_path(
+    configuration={
+        "episodeSteps": 720,
+        "turnsPerDay": 24,
+        "boardSize": environment.board_size,
+        "startingMoney": 3_000,
+        "shedCapacity": 100,
+        "maxMarketOrdersPerTurn": environment.max_orders,
+    },
+    max_orders=environment.max_orders,
+)
+self_play = SelfPlayEnv(environment, opponent)
 batch = self_play.reset()
 
 # Learner output only: [environment, worker, (operation, argument, count)].

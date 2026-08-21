@@ -10,13 +10,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 try:
-    from ._rust import execute_assignments as _execute_assignments
     from ._rust import propose_farm_tasks as _propose_farm_tasks
     from ._rust import propose_maintenance_tasks as _propose_maintenance_tasks
     from ._rust import propose_production_tasks as _propose_production_tasks
     from ._rust import NativeTaskScheduler as _NativeTaskScheduler
 except (ImportError, ModuleNotFoundError):
-    _execute_assignments = None
     _propose_farm_tasks = None
     _propose_maintenance_tasks = None
     _propose_production_tasks = None
@@ -27,19 +25,6 @@ from .vec_env import Batch, Item, UnitOp
 if TYPE_CHECKING:
     from .market import MarketPlanBatch
     from .rule_based import StrategicIntent
-
-
-def _active_unit_limit(active_units: NDArray[np.bool_]) -> int:
-    """Return the smallest prefix containing every active unit slot.
-
-    The vector environment reserves 231 unit slots under the default
-    configuration, while normal rule-policy games use only a small prefix.
-    Restricting temporary decoding/execution arrays to that live prefix avoids
-    doing the same NumPy work over hundreds of guaranteed-inactive slots.
-    """
-
-    active_slots = np.flatnonzero(np.any(active_units, axis=(0, 1)))
-    return int(active_slots[-1]) + 1 if active_slots.size else 0
 
 
 def _normalized_seat_mask(
@@ -194,10 +179,6 @@ class TaskBatch:
         tasks.target_y[..., :tile_slots] = y.reshape(-1)
         return tasks
 
-    @property
-    def capacity(self) -> int:
-        return self.active.shape[-1]
-
     def clear(self) -> None:
         """Clear proposals while retaining tile coordinates and allocations."""
 
@@ -250,46 +231,6 @@ class TaskBatch:
         self.required_count[..., : self.tile_slots][slots] = required_count
         self.exclusive[..., : self.tile_slots][slots] = exclusive
         self.work_role[..., : self.tile_slots][slots] = work_role
-
-    def set_global(
-        self,
-        extra_slot: int,
-        active: NDArray[np.bool_],
-        kind: TaskKind,
-        target_x: int | NDArray[np.int16],
-        target_y: int | NDArray[np.int16],
-        priority: float | NDArray[np.float32],
-        *,
-        item: int = -1,
-        quantity: int | NDArray[np.int64] = 1,
-        deadline: int = -1,
-        estimated_value: float = 0.0,
-        required_item: int = -1,
-        required_count: int = 0,
-        exclusive: bool = True,
-        work_role: WorkRole = WorkRole.ANY,
-    ) -> None:
-        """Set one named extra-slot task across a batch."""
-
-        if extra_slot < 0 or self.tile_slots + extra_slot >= self.capacity:
-            raise IndexError("global task slot is outside the configured capacity")
-        if active.shape != self.active.shape[:2]:
-            raise ValueError("global task mask does not match the task batch")
-        slot = self.tile_slots + extra_slot
-        self.active[..., slot] = active
-        self.kind[..., slot] = np.where(active, kind, TaskKind.NONE)
-        self.target_x[..., slot] = target_x
-        self.target_y[..., slot] = target_y
-        self.item[..., slot] = item
-        self.quantity[..., slot] = quantity
-        self.priority[..., slot] = np.where(active, priority, -np.inf)
-        self.deadline[..., slot] = deadline
-        self.estimated_value[..., slot] = estimated_value
-        self.required_item[..., slot] = required_item
-        self.required_count[..., slot] = required_count
-        self.exclusive[..., slot] = exclusive
-        self.work_role[..., slot] = np.where(active, work_role, WorkRole.ANY)
-
 
 def propose_native_farm_tasks(
     batch: Batch,
@@ -746,57 +687,9 @@ class TaskScheduler:
         return self._assignments
 
 
-class TaskExecutor:
-    """Convert assignments into legal primitive actions through Rust."""
-
-    def __init__(self, board_size: int) -> None:
-        if _execute_assignments is None:
-            raise RuntimeError(
-                "native task execution requires the bertani._rust extension"
-            )
-        self.board_size = board_size
-
-    def execute(
-        self,
-        batch: Batch,
-        tasks: TaskBatch,
-        assignments: TaskAssignments,
-        unit_actions: NDArray[np.int64],
-    ) -> None:
-        views = batch.observation_views
-        masks = batch.mask_views
-        _execute_assignments(
-            views.units,
-            masks.unit_ops,
-            masks.unit_args,
-            batch.active_units,
-            tasks.kind,
-            tasks.target_x,
-            tasks.target_y,
-            tasks.item,
-            tasks.quantity,
-            assignments.task_index,
-            unit_actions,
-            self.board_size,
-        )
-
-    @staticmethod
-    def _movement(x: int, y: int, target_x: int, target_y: int) -> UnitOp:
-        if x < target_x:
-            return UnitOp.EAST
-        if x > target_x:
-            return UnitOp.WEST
-        if y < target_y:
-            return UnitOp.SOUTH
-        if y > target_y:
-            return UnitOp.NORTH
-        return UnitOp.PASS
-
-
 __all__ = [
     "TaskAssignments",
     "TaskBatch",
-    "TaskExecutor",
     "TaskKind",
     "TaskRule",
     "TaskScheduler",

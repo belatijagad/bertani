@@ -6,9 +6,9 @@ from types import ModuleType
 
 import numpy as np
 
-from bertani import MarketOp, VecEnv
+from bertani import MarketOp, SelfPlayEnv, VecEnv
 from bertani.native_agent import load_agent_module
-from bertani.v9_opponent import V9OpponentPolicy, V9SelfPlayEnv
+from bertani.v9_opponent import V9OpponentPolicy
 
 
 def _fake_v9(steps: int = 8) -> ModuleType:
@@ -98,7 +98,7 @@ def test_self_play_wrapper_composes_alternating_seats() -> None:
         turns_per_day=2,
         weed_spawn_chance=0.0,
     )
-    wrapper = V9SelfPlayEnv(environment, _policy(_fake_v9(4), environment))
+    wrapper = SelfPlayEnv(environment, _policy(_fake_v9(4), environment))
     wrapper.reset(np.asarray([4, 5, 6, 7], dtype=np.uint64))
     learner_actions = np.zeros(
         (environment.num_envs, environment.max_units, 3), dtype=np.int64
@@ -135,7 +135,7 @@ def test_agent_loader_restores_process_gc_setting(tmp_path: Path) -> None:
 
 def test_self_play_rejects_market_lengths_without_orders() -> None:
     environment = VecEnv(1, auto_reset=False, episode_steps=3)
-    wrapper = V9SelfPlayEnv(environment, _policy(_fake_v9(3), environment))
+    wrapper = SelfPlayEnv(environment, _policy(_fake_v9(3), environment))
     wrapper.reset(np.asarray([8], dtype=np.uint64))
     learner_actions = np.zeros(
         (environment.num_envs, environment.max_units, 3), dtype=np.int64

@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from bertani import SelfPlayEnv, V16OpponentPolicy, V9SelfPlayEnv, VecEnv
+from bertani import SelfPlayEnv, V16OpponentPolicy, V9OpponentPolicy, VecEnv
 from bertani.models import ActorCriticConfig, build_actor_critic
 from bertani.ppo import (
     CompetitiveReward,
@@ -246,7 +246,19 @@ def run(args: argparse.Namespace) -> None:
         )
         self_play = SelfPlayEnv(environment, opponent)
     else:
-        self_play = V9SelfPlayEnv.from_path(environment, args.opponent_path)
+        opponent = V9OpponentPolicy.from_path(
+            args.opponent_path,
+            configuration={
+                "episodeSteps": 720,
+                "turnsPerDay": 24,
+                "boardSize": environment.board_size,
+                "startingMoney": 3_000,
+                "shedCapacity": 100,
+                "maxMarketOrdersPerTurn": environment.max_orders,
+            },
+            max_orders=environment.max_orders,
+        )
+        self_play = SelfPlayEnv(environment, opponent)
     generator = np.random.default_rng(args.seed)
     seeds = generator.integers(
         0,

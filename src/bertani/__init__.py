@@ -8,7 +8,6 @@ from .opening import (
     OpeningTurn,
 )
 from .rule_based import (
-    RuleActions,
     RuleConfig,
     RuleFeatures,
     RulePhase,
@@ -19,7 +18,6 @@ from .self_play import SelfPlayEnv
 from .tasks import (
     TaskAssignments,
     TaskBatch,
-    TaskExecutor,
     TaskKind,
     TaskRule,
     TaskScheduler,
@@ -29,7 +27,7 @@ from .tasks import (
     WorkZone,
 )
 from .v16 import V16CacheStats, V16OpponentPolicy
-from .v9_opponent import V9CacheStats, V9OpponentPolicy, V9SelfPlayEnv
+from .v9_opponent import V9CacheStats, V9OpponentPolicy
 from .vec_env import (
     Batch,
     Item,
@@ -52,14 +50,12 @@ __all__ = [
     "OpeningController",
     "OpeningDiagnostics",
     "OpeningTurn",
-    "RuleActions",
     "RuleConfig",
     "RuleFeatures",
     "RulePhase",
     "StrategicIntent",
     "TaskAssignments",
     "TaskBatch",
-    "TaskExecutor",
     "TaskKind",
     "TaskRule",
     "TaskScheduler",
@@ -69,7 +65,6 @@ __all__ = [
     "V16OpponentPolicy",
     "V9CacheStats",
     "V9OpponentPolicy",
-    "V9SelfPlayEnv",
     "VecEnv",
     "VectorRulePolicy",
     "WorkRole",

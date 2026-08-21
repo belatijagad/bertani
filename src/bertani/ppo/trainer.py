@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -45,7 +45,29 @@ class PPOStats:
     profile_synchronized: float
 
     def as_dict(self) -> dict[str, float]:
-        return asdict(self)
+        return {
+            "total_loss": self.total_loss,
+            "policy_loss": self.policy_loss,
+            "value_loss": self.value_loss,
+            "entropy": self.entropy,
+            "clip_fraction": self.clip_fraction,
+            "approximate_kl": self.approximate_kl,
+            "gradient_norm": self.gradient_norm,
+            "reward_mean": self.reward_mean,
+            "advantage_mean": self.advantage_mean,
+            "return_mean": self.return_mean,
+            "explained_variance": self.explained_variance,
+            "learning_rate": self.learning_rate,
+            "samples_per_second": self.samples_per_second,
+            "prepare_seconds": self.prepare_seconds,
+            "device_transfer_seconds": self.device_transfer_seconds,
+            "forward_seconds": self.forward_seconds,
+            "backward_seconds": self.backward_seconds,
+            "optimizer_seconds": self.optimizer_seconds,
+            "update_seconds": self.update_seconds,
+            "peak_gpu_memory_mb": self.peak_gpu_memory_mb,
+            "profile_synchronized": self.profile_synchronized,
+        }
 
 
 @dataclass(frozen=True, slots=True)

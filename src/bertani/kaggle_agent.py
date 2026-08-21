@@ -43,9 +43,6 @@ SHOP_PRODUCT_INDICES = (
     (3, 6),
     (7,),
 )
-UNIT_NAMES = tuple(operation.name for operation in UnitOp)
-MARKET_NAMES = tuple(operation.name for operation in MarketOp)
-
 PolicyFactory = Callable[[RuleConfig], VectorRulePolicy]
 
 

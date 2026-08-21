@@ -12,7 +12,6 @@ dependencies = [
     # The Rust rules engine is differential-tested against this exact oracle.
     "kaggle-environments==1.32.7",
     "numpy>=2.0",
-    "vulture>=2.16",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +28,7 @@ bertani = "bertani:main"
 dev = [
     "maturin>=1.14.1,<2.0",
     "pytest>=9.1.1,<10",
+    "vulture>=2.16",
 ]
 
 [build-system]
@@ -49,4 +49,37 @@ cache-keys = [
     { file = "Cargo.lock" },
     { file = "crates/**/Cargo.toml" },
     { file = "crates/**/*.rs" },
+]
+
+[tool.vulture]
+min_confidence = 60
+paths = ["src", "scripts", "tests"]
+# These names are consumed dynamically by PyTorch, tarfile, the preserved V9
+# module, or form part of the stable public action/task enum ABI.
+ignore_names = [
+    "forward",
+    "benchmark",
+    "mtime",
+    "uid",
+    "gid",
+    "uname",
+    "gname",
+    "_R9_MODE",
+    "_R9_LAST_STEP",
+    "_V8_COMMIT",
+    "_V8_LAST_STEP",
+    "NORTH",
+    "SOUTH",
+    "EAST",
+    "WEST",
+    "DROP",
+    "BUILD_COOP",
+    "COLLECT_FERTILIZER",
+    "PLACE_ANIMAL",
+    "DEPOSIT_INVENTORY",
+    "LIVESTOCK",
+    "SE",
+    "EGG",
+    "MILK",
+    "WOOL",
 ]

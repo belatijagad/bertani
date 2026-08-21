@@ -201,7 +201,6 @@ dependencies = [
     { name = "kaggle" },
     { name = "kaggle-environments" },
     { name = "numpy" },
-    { name = "vulture" },
 ]
 
 [package.optional-dependencies]
@@ -215,6 +214,7 @@ rl = [
 dev = [
     { name = "maturin" },
     { name = "pytest" },
+    { name = "vulture" },
 ]
 
 [package.metadata]
@@ -225,7 +225,6 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'rl'", specifier = ">=6.0" },
     { name = "torch", marker = "extra == 'rl'", specifier = ">=2.7" },
     { name = "tqdm", marker = "extra == 'rl'", specifier = ">=4.67" },
-    { name = "vulture", specifier = ">=2.16" },
 ]
 provides-extras = ["rl"]
 
@@ -233,6 +232,7 @@ provides-extras = ["rl"]
 dev = [
     { name = "maturin", specifier = ">=1.14.1,<2.0" },
     { name = "pytest", specifier = ">=9.1.1,<10" },
+    { name = "vulture", specifier = ">=2.16" },
 ]
 
 [[package]]

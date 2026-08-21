@@ -26,9 +26,6 @@ mod _rust {
     use super::v16_opponent::NativeV16Opponent;
 
     #[pymodule_export]
-    use super::executor::execute_assignments;
-
-    #[pymodule_export]
     use super::farm_tasks::propose_farm_tasks;
 
     #[pymodule_export]
@@ -39,9 +36,6 @@ mod _rust {
 
     #[pymodule_export]
     use super::production_tasks::propose_production_tasks;
-
-    #[pymodule_export]
-    use super::route_scheduler::schedule_routes;
 
     #[pymodule_export]
     use super::rule_features::extract_rule_features;

@@ -32,8 +32,6 @@ from bertani.tasks import (
     TaskRule,
     WorkforcePlan,
     propose_native_farm_tasks,
-    propose_native_maintenance_tasks,
-    propose_native_production_tasks,
 )
 from bertani.vec_env import Batch, Item
 
@@ -548,121 +546,6 @@ class FarmTaskRule:
         )
 
 
-class MaintenanceTaskRule:
-    """Generate deterministic maintenance tasks in the native extension."""
-
-    profile_key = "maintenance_tasks"
-
-    def __init__(
-        self,
-        turns_per_day: int = 24,
-        shed_capacity: int = 100,
-        episode_steps: int = 720,
-    ) -> None:
-        self.turns_per_day = turns_per_day
-        self.shed_capacity = shed_capacity
-        self.episode_steps = episode_steps
-
-    def propose_with_market_plan(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-        market_plan: MarketPlanBatch,
-    ) -> None:
-        del intent
-        propose_native_maintenance_tasks(
-            batch,
-            tasks,
-            market_plan=market_plan,
-            turns_per_day=self.turns_per_day,
-            shed_capacity=self.shed_capacity,
-            episode_steps=self.episode_steps,
-        )
-
-    def propose_with_market_plan_masked(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-        market_plan: MarketPlanBatch,
-        seat_mask: NDArray[np.bool_],
-    ) -> None:
-        del intent
-        propose_native_maintenance_tasks(
-            batch,
-            tasks,
-            market_plan=market_plan,
-            seat_mask=seat_mask,
-            turns_per_day=self.turns_per_day,
-            shed_capacity=self.shed_capacity,
-            episode_steps=self.episode_steps,
-        )
-
-    def propose(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-    ) -> None:
-        del intent  # Maintenance depends only on current survival state.
-        propose_native_maintenance_tasks(
-            batch,
-            tasks,
-            turns_per_day=self.turns_per_day,
-            shed_capacity=self.shed_capacity,
-            episode_steps=self.episode_steps,
-        )
-
-
-class ProductionTaskRule:
-    """Translate strategic farm targets into concrete tasks in Rust."""
-
-    profile_key = "production_tasks"
-
-    def __init__(
-        self,
-        shed_capacity: int = 100,
-        turns_per_day: int = 24,
-        episode_steps: int = 720,
-    ) -> None:
-        self.shed_capacity = shed_capacity
-        self.turns_per_day = turns_per_day
-        self.episode_steps = episode_steps
-
-    def propose(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-    ) -> None:
-        propose_native_production_tasks(
-            batch,
-            intent,
-            tasks,
-            turns_per_day=self.turns_per_day,
-            shed_capacity=self.shed_capacity,
-            episode_steps=self.episode_steps,
-        )
-
-    def propose_with_market_plan(
-        self,
-        batch: Batch,
-        intent: StrategicIntent,
-        tasks: TaskBatch,
-        market_plan: MarketPlanBatch,
-    ) -> None:
-        propose_native_production_tasks(
-            batch,
-            intent,
-            tasks,
-            market_plan=market_plan,
-            turns_per_day=self.turns_per_day,
-            shed_capacity=self.shed_capacity,
-            episode_steps=self.episode_steps,
-        )
-
-
 class EconomyMarketRule:
     """Fast native backend for the current hand-written market strategy."""
 
@@ -724,8 +607,6 @@ def build_policy(
     resolved = replace(
         config or RuleConfig(),
         liquidation_days=liquidation_days,
-        opening_crop_targets=(7, 0, 0, 0, 12),
-        opening_animal_targets=(0, 10, 4),
     )
     return VectorRulePolicy(
         resolved,
@@ -766,9 +647,7 @@ def build_policy(
 __all__ = [
     "EconomyMarketRule",
     "FarmTaskRule",
-    "MaintenanceTaskRule",
     "OPENING_BOOK",
-    "ProductionTaskRule",
     "IntentPlanner",
     "build_policy",
 ]

@@ -48,7 +48,6 @@ def test_v16_opponent_supports_auto_reset_self_play() -> None:
     environment = VecEnv(4, auto_reset=True, episode_steps=3)
     opponent = V16OpponentPolicy.from_path(
         baseline,
-        episode_steps=3,
         max_orders=environment.max_orders,
     )
     self_play = SelfPlayEnv(environment, opponent)

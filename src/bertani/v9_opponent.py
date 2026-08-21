@@ -18,7 +18,6 @@ from numpy.typing import NDArray
 
 from .actions import ActionBatch
 from .native_agent import load_agent_module, snapshot_observation
-from .self_play import SelfPlayEnv, SelfPlayStepProfile
 from .vec_env import Batch, Item, MarketOp, UnitOp, VecEnv
 
 DEFAULT_V9_PATH = Path(__file__).resolve().parents[2] / "references" / (
@@ -218,7 +217,7 @@ class V9OpponentPolicy:
                 # _r9_step would otherwise rebuild the exact feature that was
                 # just needed for the cache key. Calls are serial because V9's
                 # replay selector itself uses module-global trajectory state.
-                self.module._feature = lambda unused, value=feature: value
+                self.module._feature = lambda _observation, value=feature: value
             try:
                 raw = self.module.agent(observation, self.configuration) or {}
             finally:
@@ -310,40 +309,8 @@ class V9OpponentPolicy:
         return self._actions
 
 
-class V9SelfPlayEnv(SelfPlayEnv):
-    """Compatibility constructor for self-play against preserved V9."""
-
-    @classmethod
-    def from_path(
-        cls,
-        environment: VecEnv,
-        path: Path = DEFAULT_V9_PATH,
-        *,
-        cache_identical_states: bool = True,
-    ) -> V9SelfPlayEnv:
-        """Build a wrapper around ``environment`` using the preserved V9 file."""
-
-        configuration = {
-            "episodeSteps": 720,
-            "turnsPerDay": 24,
-            "boardSize": environment.board_size,
-            "startingMoney": 3_000,
-            "shedCapacity": 100,
-            "maxMarketOrdersPerTurn": environment.max_orders,
-        }
-        opponent = V9OpponentPolicy.from_path(
-            path,
-            configuration=configuration,
-            max_orders=environment.max_orders,
-            cache_identical_states=cache_identical_states,
-        )
-        return cls(environment, opponent)
-
-
 __all__ = [
     "DEFAULT_V9_PATH",
-    "SelfPlayStepProfile",
     "V9CacheStats",
     "V9OpponentPolicy",
-    "V9SelfPlayEnv",
 ]

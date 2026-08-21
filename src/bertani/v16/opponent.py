@@ -40,10 +40,7 @@ class V16OpponentPolicy:
         path: Path,
         *,
         max_orders: int = 10,
-        **unused_configuration: int,
     ) -> V16OpponentPolicy:
-        # Rust reads board and episode scales from the actual VecEnv state.
-        del unused_configuration
         return cls(load_v16_trace(path, max_orders=max_orders), max_orders=max_orders)
 
     @property

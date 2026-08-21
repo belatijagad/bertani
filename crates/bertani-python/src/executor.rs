@@ -1,7 +1,6 @@
 //! Native task-assignment executor.
 //!
-//! This mirrors `TaskExecutor.execute` exactly while avoiding the NumPy
-//! temporary arrays used by the Python implementation. Observation and mask
+//! This is called directly by the fused native scheduler. Observation and mask
 //! tensors are zero-copy strided views, so they are read through ndarray
 //! ArrayView objects rather than requiring C-contiguity.
 
@@ -74,7 +73,6 @@ fn needs_argument(operation: i64) -> bool {
     matches!(operation, UNIT_PICKUP | UNIT_PLACE | UNIT_PLANT)
 }
 
-#[pyfunction]
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(crate) fn execute_assignments<'py>(
     units: Bound<'py, PyArray5<f32>>,
