@@ -22,6 +22,8 @@ class PPOExperimentConfig:
     opponent: str
     opponent_path: Path
     reward: RewardMode
+    reward_scale: float
+    opening: str
     market: str
     max_hires_per_turn: int
     checkpoint_path: Path
@@ -45,8 +47,12 @@ class PPOExperimentConfig:
                 raise ValueError(f"{name} must be positive")
         if self.market not in {"rule-scaffold", "workforce-only"}:
             raise ValueError("market must be rule-scaffold or workforce-only")
+        if self.opening not in {"none", "rule"}:
+            raise ValueError("opening must be none or rule")
         if self.opponent not in {"v9", "v16"}:
             raise ValueError("opponent must be v9 or v16")
+        if self.reward_scale <= 0:
+            raise ValueError("reward_scale must be positive")
 
 
 def _mapping(value: object, name: str) -> dict[str, Any]:
@@ -140,13 +146,29 @@ def load_experiment_config(
     self_play = _mapping(raw["self_play_config"], "self_play_config")
     _exact_fields(
         self_play,
-        {"opponent", "opponent_path", "reward", "market", "max_hires_per_turn"},
+        {
+            "opponent",
+            "opponent_path",
+            "reward",
+            "reward_scale",
+            "opening",
+            "market",
+            "max_hires_per_turn",
+        },
         "self_play_config",
     )
     model_values = _mapping(raw["rl_model_config"], "rl_model_config")
     _exact_fields(
         model_values,
-        {"d_model", "n_blocks", "kernel_size", "dropout", "max_hands"},
+        {
+            "d_model",
+            "n_blocks",
+            "kernel_size",
+            "dropout",
+            "max_hands",
+            "workforce_prior_hands",
+            "workforce_prior_std",
+        },
         "rl_model_config",
     )
 
@@ -189,6 +211,8 @@ def load_experiment_config(
             self_play["opponent_path"], root, "self_play_config.opponent_path"
         ),
         reward=RewardMode(str(self_play["reward"])),
+        reward_scale=float(self_play["reward_scale"]),
+        opening=str(self_play["opening"]),
         market=str(self_play["market"]),
         max_hires_per_turn=int(self_play["max_hires_per_turn"]),
         checkpoint_path=_path(raw["checkpoint_path"], root, "checkpoint_path"),

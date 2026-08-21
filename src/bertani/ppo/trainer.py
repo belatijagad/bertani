@@ -30,8 +30,13 @@ class PPOStats:
     approximate_kl: float
     gradient_norm: float
     reward_mean: float
+    reward_std: float
     advantage_mean: float
+    advantage_std: float
+    raw_advantage_mean: float
+    raw_advantage_std: float
     return_mean: float
+    return_std: float
     explained_variance: float
     learning_rate: float
     samples_per_second: float
@@ -54,8 +59,13 @@ class PPOStats:
             "approximate_kl": self.approximate_kl,
             "gradient_norm": self.gradient_norm,
             "reward_mean": self.reward_mean,
+            "reward_std": self.reward_std,
             "advantage_mean": self.advantage_mean,
+            "advantage_std": self.advantage_std,
+            "raw_advantage_mean": self.raw_advantage_mean,
+            "raw_advantage_std": self.raw_advantage_std,
             "return_mean": self.return_mean,
+            "return_std": self.return_std,
             "explained_variance": self.explained_variance,
             "learning_rate": self.learning_rate,
             "samples_per_second": self.samples_per_second,
@@ -131,6 +141,8 @@ class PPOTrainer:
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
         )
+        raw_advantage_mean = float(advantages.mean())
+        raw_advantage_std = float(advantages.std(unbiased=False))
         if self.config.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (
                 advantages.std(unbiased=False) + 1e-8
@@ -218,8 +230,13 @@ class PPOTrainer:
             approximate_kl=approximate_kl,
             gradient_norm=gradient_norm,
             reward_mean=float(rollout.rewards.mean()),
+            reward_std=float(rollout.rewards.std(unbiased=False)),
             advantage_mean=float(advantages.mean()),
+            advantage_std=float(advantages.std(unbiased=False)),
+            raw_advantage_mean=raw_advantage_mean,
+            raw_advantage_std=raw_advantage_std,
             return_mean=float(returns.mean()),
+            return_std=float(returns.std(unbiased=False)),
             explained_variance=float(explained_variance),
             learning_rate=float(self.optimizer.param_groups[0]["lr"]),
             samples_per_second=processed_samples / max(update_seconds, 1e-9),

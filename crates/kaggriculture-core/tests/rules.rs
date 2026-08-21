@@ -87,6 +87,25 @@ fn initial_layout_and_clock_follow_the_reference_geometry() {
 }
 
 #[test]
+fn economic_value_preserves_owned_assets_at_acquisition_cost() {
+    let mut sim = Sim::new(deterministic_config(24));
+    let initial = sim.economic_value(0);
+    let buy_seed = Action {
+        market: vec![MarketOrder::BuySeed {
+            crop: Crop::Carrot,
+            count: 1,
+        }],
+        ..Action::pass()
+    };
+
+    step(&mut sim, buy_seed, Action::pass());
+
+    assert_eq!(sim.state.farms[0].money, 2_980.0);
+    assert_eq!(sim.economic_value(0), initial);
+    assert_eq!(sim.economic_value(1), initial);
+}
+
+#[test]
 fn market_buys_quote_post_trade_inventory_in_player_lockstep() {
     let mut config = deterministic_config(24);
     config.market_params[Product::Fertilizer.index()] = MarketParams {

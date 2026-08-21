@@ -3,6 +3,7 @@
 from .config import PPOConfig
 from .experiment import PPOExperimentConfig, load_experiment_config
 from .market import LearnerMarketPolicy, WorkforceMarketPolicy
+from .opening import OpeningPolicy, OpeningWarmStart
 from .math import (
     clipped_policy_loss,
     generalized_advantage_estimate,
@@ -24,6 +25,8 @@ __all__ = [
     "CompetitiveReward",
     "EpisodeStats",
     "LearnerMarketPolicy",
+    "OpeningPolicy",
+    "OpeningWarmStart",
     "PPOActions",
     "PPOConfig",
     "PPOExperimentConfig",

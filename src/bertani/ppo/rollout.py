@@ -14,6 +14,7 @@ from ..self_play import SelfPlayEnv
 from ..vec_env import MarketOp
 from .config import PPOConfig
 from .market import LearnerMarketPolicy
+from .opening import OpeningWarmStart
 from .rewards import CompetitiveReward
 from .storage import PPOActions, RolloutBatch
 
@@ -71,7 +72,9 @@ class RolloutProfile:
     action_composition_seconds: float
     environment_seconds: float
     reward_seconds: float
+    opening_seconds: float
     transitions: int
+    opening_transitions: int
     opponent_cache_hits: int
     opponent_cache_misses: int
     synchronized: bool
@@ -104,6 +107,7 @@ def collect_rollout(
     *,
     device: torch.device,
     step_callback: Callable[[], None] | None = None,
+    opening: OpeningWarmStart | None = None,
 ) -> RolloutCollection:
     """Collect one contiguous learner trajectory block on CPU."""
 
@@ -126,7 +130,9 @@ def collect_rollout(
         "composition": 0.0,
         "environment": 0.0,
         "reward": 0.0,
+        "opening": 0.0,
     }
+    opening_transitions = 0
     completed = wins = ties = losses = 0
     final_margin_sum = 0.0
     workforce_decisions = 0
@@ -138,6 +144,14 @@ def collect_rollout(
     cache_before = self_play.opponent.cache_stats
 
     for _ in range(config.steps_per_update):
+        if opening is not None:
+            started = time.perf_counter()
+            advanced = opening.advance(self_play)
+            if advanced:
+                reward.reset(self_play, self_play.batch)
+                opening_transitions += advanced
+            timings["opening"] += time.perf_counter() - started
+
         started = time.perf_counter()
         observation = TorchObservation.from_batch_seats(
             self_play.batch, self_play.learner_seats
@@ -330,7 +344,9 @@ def collect_rollout(
             action_composition_seconds=timings["composition"],
             environment_seconds=timings["environment"],
             reward_seconds=timings["reward"],
+            opening_seconds=timings["opening"],
             transitions=config.steps_per_update * self_play.environment.num_envs,
+            opening_transitions=opening_transitions,
             opponent_cache_hits=cache_after.hits - cache_before.hits,
             opponent_cache_misses=cache_after.misses - cache_before.misses,
             synchronized=config.profile,

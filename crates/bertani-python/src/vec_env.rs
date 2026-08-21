@@ -48,6 +48,7 @@ struct OutputBuffers<'a> {
     action_masks: &'a mut [u8],
     unit_active: &'a mut [u8],
     rewards: &'a mut [f64],
+    economic_values: &'a mut [f64],
     dones: &'a mut [u8],
     episode_ids: &'a mut [u64],
     overflows: &'a mut [u8],
@@ -170,6 +171,11 @@ impl VecEnvCore {
             checked_product(&[n, PLAYER_COUNT, self.max_units])?,
         )?;
         require_len("rewards", output.rewards.len(), n * PLAYER_COUNT)?;
+        require_len(
+            "economic_values",
+            output.economic_values.len(),
+            n * PLAYER_COUNT,
+        )?;
         require_len("dones", output.dones.len(), n * PLAYER_COUNT)?;
         require_len("episode_ids", output.episode_ids.len(), n)?;
         require_len("overflows", output.overflows.len(), n * PLAYER_COUNT)?;
@@ -282,13 +288,20 @@ impl VecEnvCore {
             .zip(output.action_masks.par_chunks_mut(mask_env_len))
             .zip(output.unit_active.par_chunks_mut(active_env_len))
             .zip(output.rewards.par_chunks_mut(PLAYER_COUNT))
+            .zip(output.economic_values.par_chunks_mut(PLAYER_COUNT))
             .zip(output.dones.par_chunks_mut(PLAYER_COUNT))
             .zip(output.episode_ids.par_iter_mut())
             .zip(output.overflows.par_chunks_mut(PLAYER_COUNT))
             .try_for_each(
                 |(
                     (
-                        ((((((slot, actions), observations), masks), active), rewards), dones),
+                        (
+                            (
+                                (((((slot, actions), observations), masks), active), rewards),
+                                economic_values,
+                            ),
+                            dones,
+                        ),
                         episode_id,
                     ),
                     overflows,
@@ -313,6 +326,11 @@ impl VecEnvCore {
                             slot.sim.reset();
                         }
                     }
+                    // Match the observation below. Under auto-reset this is
+                    // the next episode's initial potential; the terminal game
+                    // score remains available through `rewards`.
+                    economic_values[0] = slot.sim.economic_value(0);
+                    economic_values[1] = slot.sim.economic_value(1);
                     *episode_id = slot.episode_id;
                     encode_slot(
                         slot,
@@ -345,15 +363,24 @@ impl VecEnvCore {
             .zip(output.action_masks.par_chunks_mut(mask_env_len))
             .zip(output.unit_active.par_chunks_mut(active_env_len))
             .zip(output.rewards.par_chunks_mut(PLAYER_COUNT))
+            .zip(output.economic_values.par_chunks_mut(PLAYER_COUNT))
             .zip(output.dones.par_chunks_mut(PLAYER_COUNT))
             .zip(output.episode_ids.par_iter_mut())
             .zip(output.overflows.par_chunks_mut(PLAYER_COUNT))
             .try_for_each(
                 |(
-                    ((((((slot, observations), masks), active), rewards), dones), episode_id),
+                    (
+                        (
+                            (((((slot, observations), masks), active), rewards), economic_values),
+                            dones,
+                        ),
+                        episode_id,
+                    ),
                     overflows,
                 )| {
                     rewards.fill(0.0);
+                    economic_values[0] = slot.sim.economic_value(0);
+                    economic_values[1] = slot.sim.economic_value(1);
                     dones.fill(u8::from(done_from_transition && slot.sim.state.done));
                     *episode_id = slot.episode_id;
                     encode_slot(
@@ -814,6 +841,7 @@ impl NativeVecEnv {
         action_masks: Bound<'py, PyArray3<u8>>,
         unit_active: Bound<'py, PyArray3<u8>>,
         rewards: Bound<'py, PyArray2<f64>>,
+        economic_values: Bound<'py, PyArray2<f64>>,
         dones: Bound<'py, PyArray2<u8>>,
         episode_ids: Bound<'py, PyArray1<u64>>,
         overflows: Bound<'py, PyArray2<u8>>,
@@ -835,6 +863,11 @@ impl NativeVecEnv {
             &[n, PLAYER_COUNT, self.core.max_units],
         )?;
         check_shape("rewards", rewards.shape(), &[n, PLAYER_COUNT])?;
+        check_shape(
+            "economic_values",
+            economic_values.shape(),
+            &[n, PLAYER_COUNT],
+        )?;
         check_shape("dones", dones.shape(), &[n, PLAYER_COUNT])?;
         check_shape("episode_ids", episode_ids.shape(), &[n])?;
         check_shape("overflows", overflows.shape(), &[n, PLAYER_COUNT])?;
@@ -842,6 +875,7 @@ impl NativeVecEnv {
         check_c_order("action_masks", action_masks.is_c_contiguous())?;
         check_c_order("unit_active", unit_active.is_c_contiguous())?;
         check_c_order("rewards", rewards.is_c_contiguous())?;
+        check_c_order("economic_values", economic_values.is_c_contiguous())?;
         check_c_order("dones", dones.is_c_contiguous())?;
         check_c_order("episode_ids", episode_ids.is_c_contiguous())?;
         check_c_order("overflows", overflows.is_c_contiguous())?;
@@ -858,6 +892,7 @@ impl NativeVecEnv {
         let mut action_masks = borrow_array("action_masks", action_masks.try_readwrite())?;
         let mut unit_active = borrow_array("unit_active", unit_active.try_readwrite())?;
         let mut rewards = borrow_array("rewards", rewards.try_readwrite())?;
+        let mut economic_values = borrow_array("economic_values", economic_values.try_readwrite())?;
         let mut dones = borrow_array("dones", dones.try_readwrite())?;
         let mut episode_ids = borrow_array("episode_ids", episode_ids.try_readwrite())?;
         let mut overflows = borrow_array("overflows", overflows.try_readwrite())?;
@@ -870,6 +905,7 @@ impl NativeVecEnv {
             action_masks: contiguous_write("action_masks", action_masks.as_slice_mut())?,
             unit_active: contiguous_write("unit_active", unit_active.as_slice_mut())?,
             rewards: contiguous_write("rewards", rewards.as_slice_mut())?,
+            economic_values: contiguous_write("economic_values", economic_values.as_slice_mut())?,
             dones: contiguous_write("dones", dones.as_slice_mut())?,
             episode_ids: contiguous_write("episode_ids", episode_ids.as_slice_mut())?,
             overflows: contiguous_write("overflows", overflows.as_slice_mut())?,
@@ -889,6 +925,7 @@ impl NativeVecEnv {
         action_masks: Bound<'py, PyArray3<u8>>,
         unit_active: Bound<'py, PyArray3<u8>>,
         rewards: Bound<'py, PyArray2<f64>>,
+        economic_values: Bound<'py, PyArray2<f64>>,
         dones: Bound<'py, PyArray2<u8>>,
         episode_ids: Bound<'py, PyArray1<u64>>,
         overflows: Bound<'py, PyArray2<u8>>,
@@ -921,6 +958,11 @@ impl NativeVecEnv {
             &[n, PLAYER_COUNT, self.core.max_units],
         )?;
         check_shape("rewards", rewards.shape(), &[n, PLAYER_COUNT])?;
+        check_shape(
+            "economic_values",
+            economic_values.shape(),
+            &[n, PLAYER_COUNT],
+        )?;
         check_shape("dones", dones.shape(), &[n, PLAYER_COUNT])?;
         check_shape("episode_ids", episode_ids.shape(), &[n])?;
         check_shape("overflows", overflows.shape(), &[n, PLAYER_COUNT])?;
@@ -931,6 +973,7 @@ impl NativeVecEnv {
         check_c_order("action_masks", action_masks.is_c_contiguous())?;
         check_c_order("unit_active", unit_active.is_c_contiguous())?;
         check_c_order("rewards", rewards.is_c_contiguous())?;
+        check_c_order("economic_values", economic_values.is_c_contiguous())?;
         check_c_order("dones", dones.is_c_contiguous())?;
         check_c_order("episode_ids", episode_ids.is_c_contiguous())?;
         check_c_order("overflows", overflows.is_c_contiguous())?;
@@ -942,6 +985,7 @@ impl NativeVecEnv {
         let mut action_masks = borrow_array("action_masks", action_masks.try_readwrite())?;
         let mut unit_active = borrow_array("unit_active", unit_active.try_readwrite())?;
         let mut rewards = borrow_array("rewards", rewards.try_readwrite())?;
+        let mut economic_values = borrow_array("economic_values", economic_values.try_readwrite())?;
         let mut dones = borrow_array("dones", dones.try_readwrite())?;
         let mut episode_ids = borrow_array("episode_ids", episode_ids.try_readwrite())?;
         let mut overflows = borrow_array("overflows", overflows.try_readwrite())?;
@@ -953,6 +997,7 @@ impl NativeVecEnv {
             action_masks: contiguous_write("action_masks", action_masks.as_slice_mut())?,
             unit_active: contiguous_write("unit_active", unit_active.as_slice_mut())?,
             rewards: contiguous_write("rewards", rewards.as_slice_mut())?,
+            economic_values: contiguous_write("economic_values", economic_values.as_slice_mut())?,
             dones: contiguous_write("dones", dones.as_slice_mut())?,
             episode_ids: contiguous_write("episode_ids", episode_ids.as_slice_mut())?,
             overflows: contiguous_write("overflows", overflows.as_slice_mut())?,
@@ -1065,6 +1110,7 @@ mod tests {
         action_masks: Vec<u8>,
         unit_active: Vec<u8>,
         rewards: Vec<f64>,
+        economic_values: Vec<f64>,
         dones: Vec<u8>,
         episode_ids: Vec<u64>,
         overflows: Vec<u8>,
@@ -1078,6 +1124,7 @@ mod tests {
                 action_masks: vec![0; n * PLAYER_COUNT * core.mask_spec.total],
                 unit_active: vec![0; n * PLAYER_COUNT * core.max_units],
                 rewards: vec![f64::NAN; n * PLAYER_COUNT],
+                economic_values: vec![f64::NAN; n * PLAYER_COUNT],
                 dones: vec![1; n * PLAYER_COUNT],
                 episode_ids: vec![u64::MAX; n],
                 overflows: vec![1; n * PLAYER_COUNT],
@@ -1090,6 +1137,7 @@ mod tests {
                 action_masks: &mut self.action_masks,
                 unit_active: &mut self.unit_active,
                 rewards: &mut self.rewards,
+                economic_values: &mut self.economic_values,
                 dones: &mut self.dones,
                 episode_ids: &mut self.episode_ids,
                 overflows: &mut self.overflows,

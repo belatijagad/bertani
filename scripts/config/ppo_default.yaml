@@ -37,8 +37,10 @@ env_config:
 self_play_config:
   opponent: v16
   opponent_path: baselines/v16_rc5/main.py
-  # margin_delta, terminal_margin, or win_loss
+  # net_worth_delta, margin_delta, terminal_margin, or win_loss
   reward: margin_delta
+  reward_scale: 10_000
+  opening: none
   # rule-scaffold or workforce-only
   market: rule-scaffold
   max_hires_per_turn: 2
@@ -49,6 +51,8 @@ rl_model_config:
   kernel_size: 3
   dropout: 0.0
   max_hands: 16
+  workforce_prior_hands: null
+  workforce_prior_std: 2.0
 
 # Runtime and outputs. Relative paths resolve from the repository root.
 device: cuda

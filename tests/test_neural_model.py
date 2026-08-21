@@ -35,6 +35,26 @@ def test_default_model_stays_near_half_a_million_parameters() -> None:
     assert len(model.encoder.residual_blocks) == 5
 
 
+@torch.no_grad()
+def test_workforce_prior_starts_near_five_instead_of_uniform_eight() -> None:
+    model = build_actor_critic(
+        ActorCriticConfig(
+            d_model=16,
+            n_blocks=1,
+            workforce_prior_hands=5,
+            workforce_prior_std=2.0,
+        )
+    )
+    encoded = torch.zeros((4, 16, 10, 10))
+
+    log_probs, targets = model.workforce_head(encoded, temperature=0.0)
+    choices = torch.arange(17)
+    expected = (log_probs.exp() * choices).sum(dim=-1)
+
+    torch.testing.assert_close(targets, torch.full((4,), 5))
+    assert torch.all((expected > 4.9) & (expected < 5.1))
+
+
 def test_batch_adapter_matches_the_vector_environment_layout() -> None:
     env = VecEnv(
         2,

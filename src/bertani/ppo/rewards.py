@@ -12,6 +12,7 @@ from ..vec_env import Batch
 
 
 class RewardMode(StrEnum):
+    NET_WORTH_DELTA = "net_worth_delta"
     MARGIN_DELTA = "margin_delta"
     TERMINAL_MARGIN = "terminal_margin"
     WIN_LOSS = "win_loss"
@@ -25,15 +26,23 @@ class CompetitiveReward:
         mode: RewardMode = RewardMode.MARGIN_DELTA,
         *,
         starting_money: float = 3_000.0,
+        reward_scale: float = 10_000.0,
+        discount: float = 1.0,
     ) -> None:
         if starting_money <= 0:
             raise ValueError("starting_money must be positive")
+        if reward_scale <= 0:
+            raise ValueError("reward_scale must be positive")
+        if not 0.0 <= discount <= 1.0:
+            raise ValueError("discount must be between zero and one")
         self.mode = mode
         self.starting_money = starting_money
+        self.reward_scale = reward_scale
+        self.discount = discount
         self._margin: np.ndarray | None = None
 
     def reset(self, self_play: SelfPlayEnv, batch: Batch) -> None:
-        self._margin = self._observation_margin(self_play, batch)
+        self._margin = self._state_margin(self_play, batch)
 
     def transition(self, self_play: SelfPlayEnv, batch: Batch) -> torch.Tensor:
         if self._margin is None:
@@ -42,12 +51,19 @@ class CompetitiveReward:
         learner = self_play.learner_seats
         opponent = self_play.opponent_seats
         dones = batch.dones[games, learner]
-        next_margin = self._observation_margin(self_play, batch)
+        next_margin = self._state_margin(self_play, batch)
         final_margin = (
             batch.rewards[games, learner] - batch.rewards[games, opponent]
         ) / self.starting_money
 
-        if self.mode == RewardMode.MARGIN_DELTA:
+        if self.mode == RewardMode.NET_WORTH_DELTA:
+            final_margin = final_margin * self.starting_money / self.reward_scale
+            reward = np.where(
+                dones,
+                final_margin - self._margin,
+                self.discount * next_margin - self._margin,
+            )
+        elif self.mode == RewardMode.MARGIN_DELTA:
             reached_margin = np.where(dones, final_margin, next_margin)
             reward = reached_margin - self._margin
         elif self.mode == RewardMode.TERMINAL_MARGIN:
@@ -61,6 +77,19 @@ class CompetitiveReward:
         # observation at terminal transitions.
         self._margin = next_margin
         return torch.from_numpy(np.asarray(reward, dtype=np.float32))
+
+    def _state_margin(
+        self, self_play: SelfPlayEnv, batch: Batch
+    ) -> np.ndarray:
+        if self.mode == RewardMode.NET_WORTH_DELTA:
+            games = self_play.games
+            learner = self_play.learner_seats
+            opponent = self_play.opponent_seats
+            return (
+                batch.economic_values[games, learner]
+                - batch.economic_values[games, opponent]
+            ).astype(np.float64, copy=True) / self.reward_scale
+        return self._observation_margin(self_play, batch)
 
     @staticmethod
     def _observation_margin(

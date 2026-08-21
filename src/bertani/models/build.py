@@ -23,6 +23,8 @@ class ActorCriticConfig:
     kernel_size: int = 3
     dropout: float = 0.0
     max_hands: int = 16
+    workforce_prior_hands: int | None = None
+    workforce_prior_std: float = 2.0
 
     def __post_init__(self) -> None:
         positive = {
@@ -41,6 +43,12 @@ class ActorCriticConfig:
             raise ValueError("kernel_size must be odd for same-padded convolutions")
         if not 0.0 <= self.dropout <= 0.2:
             raise ValueError("dropout must be between 0 and 0.2")
+        if self.workforce_prior_hands is not None and not (
+            0 <= self.workforce_prior_hands <= self.max_hands
+        ):
+            raise ValueError("workforce_prior_hands must be between zero and max_hands")
+        if self.workforce_prior_std <= 0:
+            raise ValueError("workforce_prior_std must be positive")
 
 
 def build_actor_critic(
@@ -68,6 +76,8 @@ def build_actor_critic(
         workforce_head=WorkforceHead(
             d_model=config.d_model,
             max_hands=config.max_hands,
+            prior_hands=config.workforce_prior_hands,
+            prior_std=config.workforce_prior_std,
             activation=activation,
         ),
         value_head=ValueHead(

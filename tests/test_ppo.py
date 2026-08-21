@@ -15,13 +15,17 @@ from bertani.models import (
 )
 from bertani.ppo import (
     CompetitiveReward,
+    OpeningWarmStart,
     PPOConfig,
     PPOTrainer,
+    RewardMode,
     WorkforceMarketPolicy,
     clipped_policy_loss,
     collect_rollout,
     generalized_advantage_estimate,
 )
+from bertani.rule_based import RuleConfig
+from bertani_rules.agent import OPENING_BOOK, build_policy
 
 
 class _PassOpponent:
@@ -93,6 +97,62 @@ def test_generalized_advantage_estimate_bootstraps_backwards() -> None:
 
     torch.testing.assert_close(advantages[:, 0], torch.tensor([2.0, 1.0]))
     torch.testing.assert_close(returns, advantages)
+
+
+def test_net_worth_reward_defers_asset_purchase_cost_until_terminal() -> None:
+    environment = VecEnv(
+        1,
+        auto_reset=True,
+        episode_steps=3,
+        turns_per_day=3,
+        max_market_orders=1,
+        weed_spawn_chance=0.0,
+    )
+    self_play = SelfPlayEnv(
+        environment,
+        _PassOpponent(environment),  # type: ignore[arg-type]
+    )
+    batch = self_play.reset(np.asarray([7], dtype=np.uint64))
+    reward = CompetitiveReward(
+        RewardMode.NET_WORTH_DELTA,
+        reward_scale=10_000,
+        discount=1.0,
+    )
+    reward.reset(self_play, batch)
+    units = np.zeros((1, environment.max_units, 3), dtype=np.int64)
+    market = np.zeros((1, environment.max_orders, 3), dtype=np.int64)
+    market[0, 0] = (MarketOp.BUY_SEED, 1, 1)
+
+    first = self_play.step(units, market, np.asarray([1], dtype=np.int64))
+    first_reward = reward.transition(self_play, first)
+    terminal = self_play.step(units)
+    terminal_reward = reward.transition(self_play, terminal)
+
+    torch.testing.assert_close(first_reward, torch.zeros(1))
+    torch.testing.assert_close(terminal_reward, torch.tensor([-20 / 10_000]))
+    np.testing.assert_array_equal(terminal.economic_values, [[3_000.0, 3_000.0]])
+
+
+def test_rule_opening_warm_start_hands_control_to_ppo_at_day_three() -> None:
+    environment = VecEnv(1, weed_spawn_chance=0.0)
+    self_play = SelfPlayEnv(
+        environment,
+        _PassOpponent(environment),  # type: ignore[arg-type]
+    )
+    self_play.reset(np.asarray([17], dtype=np.uint64))
+    warm_start = OpeningWarmStart(
+        build_policy(RuleConfig(), use_opening=True),
+        handoff_step=len(OPENING_BOOK),
+        episode_steps=720,
+    )
+
+    transitions = warm_start.advance(self_play)
+
+    snapshot = environment.state_snapshot(0)
+    assert transitions == len(OPENING_BOOK)
+    assert snapshot["step"] == len(OPENING_BOOK)
+    assert snapshot["day"] == 3
+    assert warm_start.advance(self_play) == 0
 
 
 def test_clipped_policy_loss_uses_pessimistic_surrogate() -> None:

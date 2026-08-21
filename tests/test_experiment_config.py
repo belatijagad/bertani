@@ -10,6 +10,8 @@ from bertani.ppo import RewardMode, load_experiment_config
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "scripts" / "config" / "ppo_default.yaml"
 HIRE4_CONFIG = ROOT / "scripts" / "config" / "ppo_hire4.yaml"
+NET_WORTH_CONFIG = ROOT / "scripts" / "config" / "ppo_net_worth.yaml"
+OPENING_CONFIG = ROOT / "scripts" / "config" / "ppo_net_worth_opening.yaml"
 
 
 def test_default_ppo_experiment_config_loads_all_sections() -> None:
@@ -22,6 +24,8 @@ def test_default_ppo_experiment_config_loads_all_sections() -> None:
     assert config.ppo.steps_per_update > 0
     assert config.ppo.minibatch_size > 0
     assert config.reward is RewardMode.MARGIN_DELTA
+    assert config.reward_scale == 10_000
+    assert config.opening == "none"
     assert config.opponent == "v16"
     assert config.opponent_path == ROOT / "baselines" / "v16_rc5" / "main.py"
     assert config.ppo.learning_rate == 1e-4
@@ -56,3 +60,23 @@ def test_hire4_experiment_is_an_isolated_ablation() -> None:
     assert baseline.max_hires_per_turn == 2
     assert experiment.metrics_file != baseline.metrics_file
     assert experiment.checkpoint_path != baseline.checkpoint_path
+
+
+def test_net_worth_experiment_is_an_isolated_reward_ablation() -> None:
+    baseline = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
+    experiment = load_experiment_config(NET_WORTH_CONFIG, root=ROOT)
+
+    assert experiment.reward is RewardMode.NET_WORTH_DELTA
+    assert experiment.reward_scale == 10_000
+    assert experiment.max_hires_per_turn == baseline.max_hires_per_turn
+    assert experiment.metrics_file != baseline.metrics_file
+    assert experiment.checkpoint_path != baseline.checkpoint_path
+
+
+def test_opening_experiment_has_rule_handoff_and_workforce_prior() -> None:
+    experiment = load_experiment_config(OPENING_CONFIG, root=ROOT)
+
+    assert experiment.opening == "rule"
+    assert experiment.reward is RewardMode.NET_WORTH_DELTA
+    assert experiment.model.workforce_prior_hands == 5
+    assert experiment.model.workforce_prior_std == 2.0

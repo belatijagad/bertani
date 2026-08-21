@@ -25,6 +25,7 @@ def test_batches_and_named_views_reuse_the_same_memory() -> None:
         "observations": initial.observations.ctypes.data,
         "masks": initial.action_masks.ctypes.data,
         "rewards": initial.rewards.ctypes.data,
+        "economic_values": initial.economic_values.ctypes.data,
         "dones": initial.dones.ctypes.data,
     }
 
@@ -34,6 +35,7 @@ def test_batches_and_named_views_reuse_the_same_memory() -> None:
     assert stepped.observations.ctypes.data == pointers["observations"]
     assert stepped.action_masks.ctypes.data == pointers["masks"]
     assert stepped.rewards.ctypes.data == pointers["rewards"]
+    assert stepped.economic_values.ctypes.data == pointers["economic_values"]
     assert stepped.dones.ctypes.data == pointers["dones"]
     assert np.shares_memory(
         stepped.observations, stepped.observation_views.global_features

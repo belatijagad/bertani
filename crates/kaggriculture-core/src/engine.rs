@@ -79,6 +79,64 @@ impl Sim {
         self.state.farms[player].money
     }
 
+    /// Estimates the current economic value of one farm.
+    ///
+    /// This is a training potential, not a game score. Cash is combined with
+    /// owned inventory, planted assets, accumulated yields, and purchased
+    /// land. Products use the current market quote; seeds and animals retain
+    /// their acquisition cost until consumed or lost.
+    #[must_use]
+    pub fn economic_value(&self, player: usize) -> f64 {
+        let farm = &self.state.farms[player];
+        let item_value = |item: Item| -> f64 {
+            if let Some(product) = item.as_product() {
+                self.state.market.prices[product.index()]
+            } else if let Some(animal) = item.as_animal() {
+                animal.cost() as f64
+            } else {
+                0.0
+            }
+        };
+
+        let mut value = farm.money;
+        for item in Item::ALL {
+            value += farm.private.shed[item.index()] as f64 * item_value(item);
+        }
+        for inventory in &farm.private.inventories {
+            for (item, quantity) in inventory.iter() {
+                value += quantity as f64 * item_value(item);
+            }
+        }
+        for crop in Crop::ALL {
+            value += farm.private.seeds[crop.index()] as f64 * crop.seed_cost() as f64;
+        }
+
+        for tile in &farm.tiles {
+            match tile {
+                Tile::Plant(plant) => {
+                    value += plant.crop.seed_cost() as f64;
+                    value += plant.yield_units as f64
+                        * self.state.market.prices[plant.crop.product().index()];
+                }
+                Tile::Structure {
+                    animal: Some(animal),
+                    ..
+                } => {
+                    value += animal.animal.cost() as f64;
+                    value += animal.yield_units as f64
+                        * self.state.market.prices[animal.animal.product().index()];
+                    if animal.fertilizer_available {
+                        value += self.state.market.prices[Product::Fertilizer.index()];
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let extra_land = farm.unlocked_quadrants.len().saturating_sub(1);
+        value + LAND_PRICES.iter().take(extra_land).sum::<i64>() as f64
+    }
+
     /// Advances one acting transition.  Kaggle records 720 states for the
     /// default configuration, so this runs exactly 719 transitions.
     ///

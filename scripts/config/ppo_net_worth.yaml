@@ -1,5 +1,6 @@
-# Controlled neural-workforce experiment: identical to the V16 baseline except
-# that the sampled target can add up to four hands per turn instead of two.
+# Net-worth reward experiment. This keeps the PPO/model settings and frozen
+# V16 opponent fixed while replacing bank-only shaping with an economic-value
+# potential and a terminal correction to the exact final coin margin.
 
 # Training
 max_updates: 100
@@ -38,11 +39,11 @@ env_config:
 self_play_config:
   opponent: v16
   opponent_path: baselines/v16_rc5/main.py
-  reward: margin_delta
+  reward: net_worth_delta
   reward_scale: 10_000
   opening: none
   market: rule-scaffold
-  max_hires_per_turn: 4
+  max_hires_per_turn: 2
 
 rl_model_config:
   d_model: 64
@@ -53,12 +54,11 @@ rl_model_config:
   workforce_prior_hands: null
   workforce_prior_std: 2.0
 
-# Separate artifacts keep this ablation comparable with the hire-2 baseline.
 device: cuda
-checkpoint_path: outputs/ppo-v16-hire4/latest.pt
+checkpoint_path: outputs/ppo-v16-net-worth/latest.pt
 resume: null
 checkpoint_every: 25
-metrics_file: outputs/ppo-v16-hire4/metrics.jsonl
+metrics_file: outputs/ppo-v16-net-worth/metrics.jsonl
 progress: true
 profile: false
 cprofile: null

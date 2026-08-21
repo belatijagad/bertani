@@ -20,6 +20,7 @@ from bertani import SelfPlayEnv, V16OpponentPolicy, V9OpponentPolicy, VecEnv
 from bertani.models import ActorCriticConfig, build_actor_critic
 from bertani.ppo import (
     CompetitiveReward,
+    OpeningWarmStart,
     PPOConfig,
     PPOTrainer,
     RewardMode,
@@ -28,7 +29,7 @@ from bertani.ppo import (
     load_experiment_config,
 )
 from bertani.rule_based import RuleConfig
-from bertani_rules.agent import build_policy
+from bertani_rules.agent import OPENING_BOOK, build_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_FILE = Path(__file__).parent / "config" / "ppo_default.yaml"
@@ -83,10 +84,22 @@ def parse_args() -> argparse.Namespace:
         default=experiment.reward,
     )
     parser.add_argument(
+        "--reward-scale",
+        type=float,
+        default=experiment.reward_scale,
+        help="Coin scale used by net-worth reward shaping.",
+    )
+    parser.add_argument(
         "--market",
         choices=("rule-scaffold", "workforce-only"),
         default=experiment.market,
         help="Use rule buying/selling around learned hires, or train hires alone.",
+    )
+    parser.add_argument(
+        "--opening",
+        choices=("none", "rule"),
+        default=experiment.opening,
+        help="Warm-start each learner episode with the scripted rule opening.",
     )
     parser.add_argument(
         "--max-hires-per-turn",
@@ -203,6 +216,8 @@ def effective_experiment_config(
             "opponent": args.opponent,
             "opponent_path": str(args.opponent_path),
             "reward": args.reward.value,
+            "reward_scale": args.reward_scale,
+            "opening": args.opening,
             "market": args.market,
             "max_hires_per_turn": args.max_hires_per_turn,
         },
@@ -267,13 +282,27 @@ def run(args: argparse.Namespace) -> None:
         dtype=np.uint64,
     )
     batch = self_play.reset(seeds)
-    reward = CompetitiveReward(args.reward)
+    reward = CompetitiveReward(
+        args.reward,
+        reward_scale=args.reward_scale,
+        discount=ppo_config.gamma,
+    )
     reward.reset(self_play, batch)
 
-    economy = None
-    if args.market == "rule-scaffold":
-        economy = build_policy(RuleConfig(), use_opening=True, liquidation_days=1)
+    rule_policy = None
+    if args.market == "rule-scaffold" or args.opening == "rule":
+        rule_policy = build_policy(RuleConfig(), use_opening=True, liquidation_days=1)
+    economy = rule_policy if args.market == "rule-scaffold" else None
     market = WorkforceMarketPolicy(economy, max_hires_per_turn=args.max_hires_per_turn)
+    opening = (
+        OpeningWarmStart(
+            rule_policy,
+            handoff_step=len(OPENING_BOOK),
+            episode_steps=720,
+        )
+        if args.opening == "rule" and rule_policy is not None
+        else None
+    )
 
     args.metrics_file.parent.mkdir(parents=True, exist_ok=True)
     progress_disabled = not args.progress or not sys.stderr.isatty()
@@ -311,6 +340,7 @@ def run(args: argparse.Namespace) -> None:
             ppo_config,
             device=device,
             step_callback=rollout_progress.update,
+            opening=opening,
         )
         rollout_progress.close()
 
@@ -347,6 +377,26 @@ def run(args: argparse.Namespace) -> None:
         cumulative_ties += episodes.ties
         cumulative_losses += episodes.losses
         cumulative_margin += episodes.final_margin_sum
+        cumulative_win_rate = (
+            cumulative_wins / cumulative_games if cumulative_games else 0.0
+        )
+        cumulative_mean_margin = (
+            cumulative_margin / cumulative_games if cumulative_games else 0.0
+        )
+        batch_margin_text = (
+            f"{episodes.mean_final_margin:+,.0f}"
+            if episodes.completed
+            else "n/a"
+        )
+        cumulative_margin_text = (
+            f"{cumulative_mean_margin:+,.0f}" if cumulative_games else "n/a"
+        )
+        batch_win_text = (
+            f"{episodes.win_rate:.1%}" if episodes.completed else "n/a"
+        )
+        cumulative_win_text = (
+            f"{cumulative_win_rate:.1%}" if cumulative_games else "n/a"
+        )
         checkpoint_saved = trainer.updates % args.checkpoint_every == 0
         if checkpoint_saved:
             save_checkpoint(
@@ -369,6 +419,7 @@ def run(args: argparse.Namespace) -> None:
                 profile.action_composition_seconds,
                 profile.environment_seconds,
                 profile.reward_seconds,
+                profile.opening_seconds,
             )
         )
         train_attributed = sum(
@@ -398,6 +449,8 @@ def run(args: argparse.Namespace) -> None:
             "rollout/action_composition_seconds": (profile.action_composition_seconds),
             "rollout/environment_seconds": profile.environment_seconds,
             "rollout/reward_seconds": profile.reward_seconds,
+            "rollout/opening_seconds": profile.opening_seconds,
+            "rollout/opening_transitions": profile.opening_transitions,
             "rollout/unattributed_seconds": max(
                 profile.total_seconds - rollout_attributed, 0.0
             ),
@@ -414,12 +467,8 @@ def run(args: argparse.Namespace) -> None:
             "episodes/cumulative_wins": cumulative_wins,
             "episodes/cumulative_ties": cumulative_ties,
             "episodes/cumulative_losses": cumulative_losses,
-            "episodes/cumulative_win_rate": (
-                cumulative_wins / cumulative_games if cumulative_games else 0.0
-            ),
-            "episodes/cumulative_mean_final_margin": (
-                cumulative_margin / cumulative_games if cumulative_games else 0.0
-            ),
+            "episodes/cumulative_win_rate": cumulative_win_rate,
+            "episodes/cumulative_mean_final_margin": cumulative_mean_margin,
             "workforce/mean_target_hands": workforce.mean_target_hands,
             "workforce/mean_current_hands": workforce.mean_current_hands,
             "workforce/target_met_rate": workforce.target_met_rate,
@@ -445,32 +494,39 @@ def run(args: argparse.Namespace) -> None:
         with args.metrics_file.open("a", encoding="utf-8") as metrics_file:
             metrics_file.write(line + "\n")
         if progress_disabled:
-            episode_status = (
-                f"win={episodes.win_rate:.1%}"
-                if episodes.completed
-                else "win=n/a"
-            )
             print(
                 f"update {trainer.updates}/{args.updates}: complete | "
                 f"rollout={profile.transitions_per_second:.0f} step/s | "
                 f"train={stats.samples_per_second:.0f} sample/s | "
-                f"loss={stats.total_loss:.3g} | {episode_status} | "
-                f"hands={workforce.mean_current_hands:.1f}/"
-                f"{workforce.mean_target_hands:.1f} | "
+                f"games={episodes.completed} (total={cumulative_games}) | "
+                f"final_margin_avg={batch_margin_text} "
+                f"(running={cumulative_margin_text}) | "
+                f"win={batch_win_text} (all={cumulative_win_text}) | "
+                f"reward={stats.reward_mean:.3g}±{stats.reward_std:.3g} | "
+                f"KL={stats.approximate_kl:.3g} | "
+                f"EV={stats.explained_variance:.3f} | "
+                f"loss={stats.total_loss:.3g} | "
+                f"hands_now={workforce.mean_current_hands:.1f} | "
+                f"hands_target={workforce.mean_target_hands:.1f} | "
                 f"hires={workforce.observed_hires}",
                 file=sys.stderr,
                 flush=True,
             )
         update_progress.set_description(f"update {trainer.updates}: complete")
         update_progress.set_postfix(
+            games=f"{episodes.completed}/{cumulative_games}",
+            final_margin=batch_margin_text,
+            margin_running=cumulative_margin_text,
+            win=batch_win_text,
+            win_all=cumulative_win_text,
+            reward=f"{stats.reward_mean:.2g}±{stats.reward_std:.2g}",
+            KL=f"{stats.approximate_kl:.2g}",
+            EV=f"{stats.explained_variance:.2f}",
+            loss=f"{stats.total_loss:.2g}",
             rollout_sps=f"{profile.transitions_per_second:.0f}",
             train_sps=f"{stats.samples_per_second:.0f}",
-            loss=f"{stats.total_loss:.3g}",
-            win=f"{episodes.win_rate:.1%}" if episodes.completed else "n/a",
-            hands=(
-                f"{workforce.mean_current_hands:.1f}/"
-                f"{workforce.mean_target_hands:.1f}"
-            ),
+            hands_now=f"{workforce.mean_current_hands:.1f}",
+            hands_target=f"{workforce.mean_target_hands:.1f}",
         )
         update_progress.update()
 

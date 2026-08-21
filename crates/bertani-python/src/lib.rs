@@ -63,7 +63,7 @@ mod _rust {
     };
 
     #[pymodule_export]
-    const RL_API_VERSION: usize = 1;
+    const RL_API_VERSION: usize = 2;
 
     #[pymodule_export]
     const ITEM_WHEAT: i64 = super::action::ITEM_WHEAT;

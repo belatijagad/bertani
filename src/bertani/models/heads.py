@@ -146,9 +146,15 @@ class WorkforceHead(nn.Module):
         d_model: int,
         max_hands: int,
         *,
+        prior_hands: int | None = None,
+        prior_std: float = 2.0,
         activation: Callable[[], nn.Module] = nn.GELU,
     ) -> None:
         super().__init__()
+        if prior_hands is not None and not 0 <= prior_hands <= max_hands:
+            raise ValueError("prior_hands must be between zero and max_hands")
+        if prior_std <= 0:
+            raise ValueError("prior_std must be positive")
         self.max_hands = max_hands
         self.layers = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -158,6 +164,12 @@ class WorkforceHead(nn.Module):
         first, _, output = self.layers
         orthogonal_initialization_(first)
         orthogonal_initialization_(output, scale=0.01)
+        if prior_hands is not None:
+            targets = torch.arange(max_hands + 1, dtype=output.bias.dtype)
+            with torch.no_grad():
+                output.bias.copy_(
+                    -0.5 * ((targets - prior_hands) / prior_std).square()
+                )
 
     def forward(
         self,
