@@ -7,7 +7,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from ..rule_based import VectorRulePolicy
+from ..actions import ActionBatch
 from ..vec_env import Batch, MarketOp
 
 
@@ -23,12 +23,22 @@ class LearnerMarketPolicy(Protocol):
         """Return learner-only market actions and active prefix lengths."""
 
 
+class RuleMarketPolicy(Protocol):
+    def act_market(
+        self,
+        batch: Batch,
+        max_orders: int,
+        seat_mask: NDArray[np.bool_],
+    ) -> ActionBatch:
+        """Return rule-based market orders without planning unit actions."""
+
+
 class WorkforceMarketPolicy:
     """Replace rule-policy hires with hires selected by the workforce head."""
 
     def __init__(
         self,
-        base_policy: VectorRulePolicy,
+        base_policy: RuleMarketPolicy,
         *,
         max_hires_per_turn: int = 2,
     ) -> None:
@@ -58,7 +68,7 @@ class WorkforceMarketPolicy:
 
         seat_mask = np.zeros((environments, 2), dtype=np.bool_)
         seat_mask[games, seats] = True
-        base_actions = self.base_policy.act(
+        base_actions = self.base_policy.act_market(
             batch, max_orders=max_orders, seat_mask=seat_mask
         )
 
@@ -93,4 +103,4 @@ class WorkforceMarketPolicy:
             self._lengths = np.zeros(environments, dtype=np.int64)
 
 
-__all__ = ["LearnerMarketPolicy", "WorkforceMarketPolicy"]
+__all__ = ["LearnerMarketPolicy", "RuleMarketPolicy", "WorkforceMarketPolicy"]

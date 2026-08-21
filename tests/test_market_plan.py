@@ -11,7 +11,7 @@ from bertani import (
     VecEnv,
     VectorRulePolicy,
 )
-from bertani_rules.agent import IntentPlanner
+from bertani_rules.agent import IntentPlanner, build_policy
 
 
 def test_market_plan_preserves_order_and_resource_reservations() -> None:
@@ -76,3 +76,30 @@ def test_custom_market_rule_consumes_intent_without_raw_tensor_access() -> None:
     np.testing.assert_array_equal(actions.market_actions[..., 0, 0], MarketOp.HIRE)
     assert policy.last_market_plan is not None
     np.testing.assert_array_equal(policy.last_market_plan.reserved_cash, 100)
+
+
+def test_market_only_path_matches_full_policy_without_scheduling_tasks() -> None:
+    env = VecEnv(3, episode_steps=336, weed_spawn_chance=0.0)
+    batch = env.reset(np.asarray([11, 12, 13], dtype=np.uint64))
+    seat_mask = np.asarray(
+        [[True, False], [False, True], [True, False]], dtype=np.bool_
+    )
+    policy = build_policy(
+        RuleConfig(episode_steps=336),
+        use_opening=False,
+        liquidation_days=0,
+    )
+
+    full = policy.act(batch, max_orders=env.max_orders, seat_mask=seat_mask)
+    expected_actions = full.market_actions.copy()
+    expected_lengths = full.market_lengths.copy()
+    assert policy.last_tasks is not None
+
+    market_only = policy.act_market(
+        batch, max_orders=env.max_orders, seat_mask=seat_mask
+    )
+
+    np.testing.assert_array_equal(market_only.market_actions, expected_actions)
+    np.testing.assert_array_equal(market_only.market_lengths, expected_lengths)
+    assert policy.last_tasks is None
+    assert policy.last_assignments is None

@@ -273,37 +273,7 @@ class VectorRulePolicy:
             self.last_assignments = None
             return actions
 
-        started = time.perf_counter_ns() if self.profile else 0
-        features = self.extract_features(batch)
-        if self.profile:
-            self.profile_ns["features"] += time.perf_counter_ns() - started
-
-        started = time.perf_counter_ns() if self.profile else 0
-        planner_from_features = getattr(
-            self.intent_planner, "from_features", None
-        )
-        if planner_from_features is not None:
-            intent = planner_from_features(batch, features)
-        else:
-            intent = self.plan(batch)
-        if self.profile:
-            self.profile_ns["intent"] += time.perf_counter_ns() - started
-
-        # Build the economic plan before routing so the tactical layer can use
-        # its purchases as next-turn staging hints. Unit actions still resolve
-        # before market orders, so current-turn tasks never consume them.
-        started = time.perf_counter_ns() if self.profile else 0
-        self._append_liquidation_sales(
-            features, intent, self.last_market_plan, seat_mask=seat_mask
-        )
-        for rule in self.market_rules:
-            masked_propose = getattr(rule, "propose_masked", None)
-            if seat_mask is not None and masked_propose is not None:
-                masked_propose(batch, intent, self.last_market_plan, seat_mask)
-            else:
-                rule.propose(batch, intent, self.last_market_plan)
-        if self.profile:
-            self.profile_ns["market"] += time.perf_counter_ns() - started
+        features, intent = self._plan_market(batch, seat_mask)
 
         tasks = self._task_buffers(batch)
         tasks.clear()
@@ -371,6 +341,67 @@ class VectorRulePolicy:
         else:
             self.last_opening_diagnostics = None
         return actions
+
+    def act_market(
+        self,
+        batch: Batch,
+        max_orders: int = 10,
+        seat_mask: NDArray[np.bool_] | None = None,
+    ) -> ActionBatch:
+        """Run only strategic and market rules, skipping all worker routing.
+
+        This is the inexpensive economic scaffold used by PPO after its
+        opening warm start. The neural policy supplies unit actions, so task
+        generation, workforce planning, and scheduling would be discarded.
+        """
+
+        actions = self._action_buffers(batch, max_orders)
+        actions.unit_actions.fill(0)
+        assert self.last_market_plan is not None
+        self.last_market_plan.clear()
+        self._plan_market(batch, seat_mask)
+        self.last_tasks = None
+        self.last_assignments = None
+        self.last_opening_diagnostics = None
+        return actions
+
+    def _plan_market(
+        self,
+        batch: Batch,
+        seat_mask: NDArray[np.bool_] | None,
+    ) -> tuple[RuleFeatures, StrategicIntent]:
+        """Populate the reusable market plan and return its shared context."""
+
+        assert self.last_market_plan is not None
+        started = time.perf_counter_ns() if self.profile else 0
+        features = self.extract_features(batch)
+        if self.profile:
+            self.profile_ns["features"] += time.perf_counter_ns() - started
+
+        started = time.perf_counter_ns() if self.profile else 0
+        planner_from_features = getattr(self.intent_planner, "from_features", None)
+        if planner_from_features is not None:
+            intent = planner_from_features(batch, features)
+        else:
+            intent = self.plan(batch)
+        if self.profile:
+            self.profile_ns["intent"] += time.perf_counter_ns() - started
+
+        # Build economics before routing so the full tactical policy can use
+        # purchases as next-turn staging hints.
+        started = time.perf_counter_ns() if self.profile else 0
+        self._append_liquidation_sales(
+            features, intent, self.last_market_plan, seat_mask=seat_mask
+        )
+        for rule in self.market_rules:
+            masked_propose = getattr(rule, "propose_masked", None)
+            if seat_mask is not None and masked_propose is not None:
+                masked_propose(batch, intent, self.last_market_plan, seat_mask)
+            else:
+                rule.propose(batch, intent, self.last_market_plan)
+        if self.profile:
+            self.profile_ns["market"] += time.perf_counter_ns() - started
+        return features, intent
 
     def _task_buffers(self, batch: Batch) -> TaskBatch:
         n, players, _ = batch.active_units.shape

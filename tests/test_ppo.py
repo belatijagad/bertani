@@ -52,7 +52,7 @@ class _PassOpponent:
 
 
 class _BaseMarket:
-    def act(
+    def act_market(
         self,
         batch: object,
         max_orders: int,

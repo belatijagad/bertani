@@ -2,7 +2,7 @@
 
 from .config import PPOConfig
 from .experiment import PPOExperimentConfig, load_experiment_config
-from .market import LearnerMarketPolicy, WorkforceMarketPolicy
+from .market import LearnerMarketPolicy, RuleMarketPolicy, WorkforceMarketPolicy
 from .opening import OpeningPolicy, OpeningWarmStart
 from .math import (
     clipped_policy_loss,
@@ -35,6 +35,7 @@ __all__ = [
     "PPOStats",
     "PPOTrainer",
     "RewardMode",
+    "RuleMarketPolicy",
     "TerminalScore",
     "RolloutBatch",
     "RolloutCollection",
