@@ -9,8 +9,8 @@
 #![allow(clippy::all, clippy::pedantic)]
 
 use numpy::{
-    ndarray::ArrayView5, PyArray2, PyArray3, PyArray4, PyArray5, PyArrayMethods,
-    PyUntypedArrayMethods,
+    PyArray2, PyArray3, PyArray4, PyArray5, PyArrayMethods, PyUntypedArrayMethods,
+    ndarray::ArrayView5,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -108,7 +108,9 @@ impl NativeTaskScheduler {
         turns_per_day: i64,
     ) -> PyResult<Self> {
         if board_size == 0 || shed_capacity <= 0 || episode_steps <= 0 || turns_per_day <= 0 {
-            return Err(PyValueError::new_err("scheduler configuration must be positive"));
+            return Err(PyValueError::new_err(
+                "scheduler configuration must be positive",
+            ));
         }
         Ok(Self {
             board_size,
@@ -224,13 +226,17 @@ impl NativeTaskScheduler {
             ("out_score", out_score.is_c_contiguous()),
         ] {
             if !contiguous {
-                return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be C-contiguous"
+                )));
             }
         }
 
         let global_shape = global_features.shape();
         if global_shape.len() != 3 || global_shape[2] < 1 {
-            return Err(PyValueError::new_err("global_features has incompatible shape"));
+            return Err(PyValueError::new_err(
+                "global_features has incompatible shape",
+            ));
         }
         let num_envs = global_shape[0];
         let players = global_shape[1];
@@ -258,7 +264,9 @@ impl NativeTaskScheduler {
         }
         let task_count = task_shape[2];
         if self.board_size.saturating_mul(self.board_size) > task_count {
-            return Err(PyValueError::new_err("task capacity is smaller than board tile slots"));
+            return Err(PyValueError::new_err(
+                "task capacity is smaller than board tile slots",
+            ));
         }
         for (name, shape) in [
             ("task_kind", task_kind.shape()),
@@ -272,20 +280,28 @@ impl NativeTaskScheduler {
             ("task_work_role", task_work_role.shape()),
         ] {
             if shape != task_shape {
-                return Err(PyValueError::new_err(format!("{name} shape does not match task_active")));
+                return Err(PyValueError::new_err(format!(
+                    "{name} shape does not match task_active"
+                )));
             }
         }
         if unit_role.shape() != active_shape || unit_zone.shape() != active_shape {
-            return Err(PyValueError::new_err("workforce unit arrays must match active_units"));
+            return Err(PyValueError::new_err(
+                "workforce unit arrays must match active_units",
+            ));
         }
         if reserved_by_kind.shape() != [num_envs, players, TASK_KIND_COUNT] {
-            return Err(PyValueError::new_err("reserved_by_kind has incompatible shape"));
+            return Err(PyValueError::new_err(
+                "reserved_by_kind has incompatible shape",
+            ));
         }
         if seat_mask.shape() != [num_envs, players] {
             return Err(PyValueError::new_err("seat_mask has incompatible shape"));
         }
         if out_task_index.shape() != active_shape || out_score.shape() != active_shape {
-            return Err(PyValueError::new_err("assignment outputs must match active_units"));
+            return Err(PyValueError::new_err(
+                "assignment outputs must match active_units",
+            ));
         }
 
         let shape = (num_envs, players, max_units);
@@ -348,9 +364,7 @@ impl NativeTaskScheduler {
         for environment in 0..num_envs {
             for player in 0..players {
                 let seat = environment * players + player;
-                let step = round_i64(
-                    global[[environment, player, 0]] * self.last_step as f32,
-                );
+                let step = round_i64(global[[environment, player, 0]] * self.last_step as f32);
                 let hour = step.rem_euclid(self.turns_per_day);
                 let new_day = hour == 0;
                 let unit_offset = seat * max_units;
@@ -369,15 +383,13 @@ impl NativeTaskScheduler {
                 if !seat_mask[seat] {
                     continue;
                 }
-                let step = round_i64(
-                    global[[environment, player, 0]] * self.last_step as f32,
-                );
+                let step = round_i64(global[[environment, player, 0]] * self.last_step as f32);
                 let hour_i64 = step.rem_euclid(self.turns_per_day);
                 let day_i64 = step.div_euclid(self.turns_per_day);
                 let hour = i32::try_from(hour_i64)
                     .map_err(|_| PyValueError::new_err("hour exceeds i32"))?;
-                let day = i32::try_from(day_i64)
-                    .map_err(|_| PyValueError::new_err("day exceeds i32"))?;
+                let day =
+                    i32::try_from(day_i64).map_err(|_| PyValueError::new_err("day exceeds i32"))?;
 
                 self.assign_seat(
                     seat,
@@ -556,9 +568,8 @@ impl NativeTaskScheduler {
             unit_x[worker] = round_i16(units_all[[environment, player, 0, worker, 2]] * scale);
             unit_y[worker] = round_i16(units_all[[environment, player, 0, worker, 3]] * scale);
             for item in 0..INVENTORY_ITEMS {
-                inventories[worker * INVENTORY_ITEMS + item] = round_i64(
-                    units_all[[environment, player, 0, worker, 5 + item]] * shed_scale,
-                );
+                inventories[worker * INVENTORY_ITEMS + item] =
+                    round_i64(units_all[[environment, player, 0, worker, 5 + item]] * shed_scale);
             }
         }
 
@@ -568,10 +579,8 @@ impl NativeTaskScheduler {
         let task_target_y = &task_target_y_all[task_offset..task_offset + task_count];
         let task_priority = &task_priority_all[task_offset..task_offset + task_count];
         let task_deadline = &task_deadline_all[task_offset..task_offset + task_count];
-        let task_required_item =
-            &task_required_item_all[task_offset..task_offset + task_count];
-        let task_required_count =
-            &task_required_count_all[task_offset..task_offset + task_count];
+        let task_required_item = &task_required_item_all[task_offset..task_offset + task_count];
+        let task_required_count = &task_required_count_all[task_offset..task_offset + task_count];
         let task_exclusive = &task_exclusive_all[task_offset..task_offset + task_count];
         let task_work_role = &task_work_role_all[task_offset..task_offset + task_count];
         let reserved_by_kind =
@@ -621,8 +630,14 @@ impl NativeTaskScheduler {
         }
 
         self.full_solves += 1;
-        let starts_x = active_units.iter().map(|&worker| unit_x[worker]).collect::<Vec<_>>();
-        let starts_y = active_units.iter().map(|&worker| unit_y[worker]).collect::<Vec<_>>();
+        let starts_x = active_units
+            .iter()
+            .map(|&worker| unit_x[worker])
+            .collect::<Vec<_>>();
+        let starts_y = active_units
+            .iter()
+            .map(|&worker| unit_y[worker])
+            .collect::<Vec<_>>();
         let mut seat_inventories = Vec::with_capacity(active_units.len() * INVENTORY_ITEMS);
         let mut seat_roles = Vec::with_capacity(active_units.len());
         let mut seat_zones = Vec::with_capacity(active_units.len());
@@ -1099,12 +1114,8 @@ impl NativeTaskScheduler {
 
                             let tx = task_target_x[task];
                             let ty = task_target_y[task];
-                            let idle_distance = manhattan(
-                                unit_x[idle_worker],
-                                unit_y[idle_worker],
-                                tx,
-                                ty,
-                            );
+                            let idle_distance =
+                                manhattan(unit_x[idle_worker], unit_y[idle_worker], tx, ty);
                             let idle_length = idle_distance + 1;
 
                             // The stolen task becomes the idle worker's head.
@@ -1124,9 +1135,7 @@ impl NativeTaskScheduler {
                                 let next_task = donor_route[position + 1];
                                 let nx = task_target_x[next_task];
                                 let ny = task_target_y[next_task];
-                                to_task + manhattan(tx, ty, nx, ny)
-                                    - manhattan(px, py, nx, ny)
-                                    + 1
+                                to_task + manhattan(tx, ty, nx, ny) - manhattan(px, py, nx, ny) + 1
                             } else {
                                 to_task + 1
                             };
@@ -1165,9 +1174,9 @@ impl NativeTaskScheduler {
                                 donor_position: position,
                                 task,
                             };
-                            if best.is_none_or(|current| {
-                                steal_candidate_is_better(candidate, current)
-                            }) {
+                            if best
+                                .is_none_or(|current| steal_candidate_is_better(candidate, current))
+                            {
                                 best = Some(candidate);
                             }
                         }
@@ -1294,9 +1303,11 @@ impl NativeTaskScheduler {
     ) -> PyResult<()> {
         let tile_slots = self.board_size * self.board_size;
         for &worker in active_units {
-            let local = usize::try_from(unit_y[worker])
-                .ok()
-                .and_then(|y| usize::try_from(unit_x[worker]).ok().map(|x| y * self.board_size + x));
+            let local = usize::try_from(unit_y[worker]).ok().and_then(|y| {
+                usize::try_from(unit_x[worker])
+                    .ok()
+                    .map(|x| y * self.board_size + x)
+            });
             let Some(local) = local else {
                 continue;
             };

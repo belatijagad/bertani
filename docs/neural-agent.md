@@ -97,9 +97,12 @@ rewards = self_play.learner_rewards()
 V9 is a 22 MB replay ensemble whose decoded Python bank is much larger. The
 adapter imports that bank once, keeps only its small trajectory state per
 environment, restores Python cyclic garbage collection after import, reuses the
-native action buffers, and caches identical states within a vector step. Do not
-instantiate one V9 module per environment or put `NativeFileAgentPolicy` in the
-PPO hot loop.
+native action buffers, and caches identical states within a vector step. The
+cache key is generated for the whole batch directly from Rust simulator state
+and mirrors V9's feature tuple, so cache hits never construct Python snapshots.
+Only one representative of each unique V9 state crosses into the preserved
+Python replay selector. Do not instantiate one V9 module per environment or put
+`NativeFileAgentPolicy` in the PPO hot loop.
 
 ## PPO training
 
@@ -124,6 +127,14 @@ uv run python scripts/train_ppo.py --config scripts/config/ppo_worker_ablation.y
 
 Command-line options still override the loaded file for quick one-off changes,
 for example `--updates 10 --num-envs 8 --device cpu --no-progress`.
+
+The default GPU section enables mixed precision, TF32, channels-last
+convolutions, fused Adam, and `torch.compile`. PPO rollout tensors are uploaded
+once per update and shuffled/indexed directly on the GPU instead of being
+copied once per minibatch. Edit `gpu_config` in the experiment YAML to disable
+individual optimizations when comparing hardware or debugging. Compilation is
+lazy, so the first rollout and optimizer pass include graph-compilation time;
+judge throughput from later updates.
 
 The default `margin_delta` reward is the per-turn change in normalized bank
 margin. It telescopes to the final margin without discarding information about

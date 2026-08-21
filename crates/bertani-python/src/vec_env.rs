@@ -1,6 +1,6 @@
 //! Batched simulator ownership and the NumPy/PyO3 boundary.
 
-use kaggriculture_core::{Action, Config, Sim, State};
+use kaggriculture_core::{Action, Config, Crop, Item, Product, Sim, State, Structure, Tile};
 use numpy::{PyArray1, PyArray2, PyArray3, PyArray4, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -118,6 +118,37 @@ impl VecEnvCore {
 
     fn num_envs(&self) -> usize {
         self.slots.len()
+    }
+
+    fn v9_fingerprints(&self, seats: &[i64], output: &mut [u64]) -> Result<(), String> {
+        require_len("seats", seats.len(), self.num_envs())?;
+        require_len("fingerprints", output.len(), self.num_envs() * 6)?;
+        if let Some((index, seat)) = seats
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, seat)| !matches!(seat, 0 | 1))
+        {
+            return Err(format!("seat {index} is {seat}; expected 0 or 1"));
+        }
+
+        self.slots
+            .par_iter()
+            .zip(seats.par_iter().copied())
+            .zip(output.par_chunks_mut(6))
+            .for_each(|((slot, seat), row)| {
+                let (state_a, state_b) = v9_state_fingerprint(&slot.sim.state, seat as usize);
+                let (town_a, town_b) = v9_town_fingerprint(&slot.sim.state);
+                row.copy_from_slice(&[
+                    state_a,
+                    state_b,
+                    town_a,
+                    town_b,
+                    u64::from(slot.sim.state.step),
+                    (1 + slot.sim.state.farms[seat as usize].hands.len()) as u64,
+                ]);
+            });
+        Ok(())
     }
 
     fn validate_output_lengths(&self, output: &OutputBuffers<'_>) -> Result<(), String> {
@@ -446,6 +477,145 @@ fn validate_tensor_dimensions(board_size: usize, max_units: usize) -> Result<(),
     .try_fold(0_usize, usize::checked_add)
     .ok_or_else(|| "action-mask dimensions overflow usize".to_owned())?;
     Ok(())
+}
+
+// Two independently-seeded SplitMix-style accumulators make collisions
+// negligible while keeping this hot path allocation-free. The fingerprint is
+// follows V9's feature tuple field-for-field, avoiding hundreds of Python dict
+// and string allocations per simulator slot.
+#[derive(Clone, Copy)]
+struct Fingerprint(u64, u64);
+
+impl Fingerprint {
+    const fn new() -> Self {
+        Self(0x243f_6a88_85a3_08d3, 0x1319_8a2e_0370_7344)
+    }
+
+    fn push(&mut self, value: u64) {
+        self.0 = fingerprint_mix(self.0 ^ value);
+        self.1 = fingerprint_mix(self.1 ^ value.rotate_left(29));
+    }
+
+    const fn finish(self) -> (u64, u64) {
+        (self.0, self.1)
+    }
+}
+
+fn fingerprint_mix(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn v9_town_fingerprint(state: &State) -> (u64, u64) {
+    let mut hash = Fingerprint::new();
+    hash.push(state.town.unlocked_shops.len() as u64);
+    for &shop in &state.town.unlocked_shops {
+        hash.push(shop as u64);
+    }
+    hash.finish()
+}
+
+fn v9_state_fingerprint(state: &State, seat: usize) -> (u64, u64) {
+    const V9_ITEMS: [Item; 12] = [
+        Item::Carrot,
+        Item::Cow,
+        Item::Egg,
+        Item::Fertilizer,
+        Item::Goose,
+        Item::Melon,
+        Item::Milk,
+        Item::Sheep,
+        Item::Strawberry,
+        Item::Tomato,
+        Item::Wheat,
+        Item::Wool,
+    ];
+    const V9_SEEDS: [Crop; 5] = [
+        Crop::Carrot,
+        Crop::Melon,
+        Crop::Strawberry,
+        Crop::Tomato,
+        Crop::Wheat,
+    ];
+    const V9_PRICES: [Product; 9] = [
+        Product::Carrot,
+        Product::Egg,
+        Product::Fertilizer,
+        Product::Melon,
+        Product::Milk,
+        Product::Strawberry,
+        Product::Tomato,
+        Product::Wheat,
+        Product::Wool,
+    ];
+
+    let mut hash = Fingerprint::new();
+    let farm = &state.farms[seat];
+    hash.push(farm.money.round_ties_even() as i64 as u64);
+    hash.push((farm.farmer.x * 10 + farm.farmer.y) as u64);
+    hash.push(farm.hands.len() as u64);
+    for hand in &farm.hands {
+        hash.push((hand.x * 10 + hand.y) as u64);
+    }
+
+    hash.push(farm.private.inventories.len() as u64);
+    for inventory in &farm.private.inventories {
+        for item in V9_ITEMS {
+            hash.push(inventory.get(item) as u64);
+        }
+    }
+    for crop in V9_SEEDS {
+        hash.push(farm.private.seeds[crop.index()] as u64);
+    }
+    for item in V9_ITEMS {
+        hash.push(farm.private.shed[item.index()] as u64);
+    }
+
+    for tile in &farm.tiles {
+        match tile {
+            Tile::Empty => hash.push(0),
+            Tile::Locked => hash.push(1),
+            Tile::Weed => hash.push(2),
+            Tile::Plant(plant) => {
+                hash.push(3);
+                hash.push(plant.crop as u64);
+                hash.push(plant.planted_day as i64 as u64);
+                hash.push(u64::from(plant.watered_today));
+                hash.push(plant.consecutive_unwatered as i64 as u64);
+                hash.push(plant.yield_units as u64);
+                hash.push(plant.max_lifespan_step as u64);
+                hash.push(plant.fertilized_until_day as i64 as u64);
+            }
+            Tile::Structure { kind, animal } => match kind {
+                // V9's tile signature intentionally treats every coop as the
+                // same "COOP" token, even when it contains a goose.
+                Structure::Coop => hash.push(4),
+                Structure::Pasture => {
+                    hash.push(5);
+                    match animal {
+                        None => hash.push(u64::MAX),
+                        Some(animal) => {
+                            hash.push(animal.animal as u64);
+                            hash.push(animal.yield_units as u64);
+                            hash.push(animal.consecutive_unfed as i64 as u64);
+                            hash.push(u64::from(animal.fed_today));
+                            hash.push(u64::from(animal.cared_today));
+                            hash.push(u64::from(animal.fertilizer_available));
+                            hash.push(animal.pending_care_bonus as u64);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    for product in V9_PRICES {
+        hash.push(state.market.prices[product.index()] as i64 as u64);
+    }
+    hash.push(farm.unlocked_quadrants.len() as u64);
+    hash.finish()
 }
 
 fn require_len(name: &str, actual: usize, expected: usize) -> Result<(), String> {
@@ -777,6 +947,27 @@ impl NativeVecEnv {
             PyIndexError::new_err(format!("environment index {index} is out of range"))
         })?;
         state_snapshot(py, &slot.sim.state, slot.sim.config.seed, slot.episode_id)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn v9_fingerprints<'py>(
+        &self,
+        seats: Bound<'py, PyArray1<i64>>,
+        output: Bound<'py, PyArray2<u64>>,
+    ) -> PyResult<()> {
+        let n = self.core.num_envs();
+        check_shape("seats", seats.shape(), &[n])?;
+        check_shape("output", output.shape(), &[n, 6])?;
+        check_c_order("seats", seats.is_c_contiguous())?;
+        check_c_order("output", output.is_c_contiguous())?;
+        let seats = borrow_array("seats", seats.try_readonly())?;
+        let mut output = borrow_array("output", output.try_readwrite())?;
+        self.core
+            .v9_fingerprints(
+                contiguous_read("seats", seats.as_slice())?,
+                contiguous_write("output", output.as_slice_mut())?,
+            )
+            .map_err(PyValueError::new_err)
     }
 
     fn terminal_snapshot<'py>(

@@ -290,9 +290,7 @@ fn best_insertion_for_worker(
             let next_task = route[position];
             let nx = target_x[next_task];
             let ny = target_y[next_task];
-            to_insert
-                + i32::from((tx - nx).abs())
-                + i32::from((ty - ny).abs())
+            to_insert + i32::from((tx - nx).abs()) + i32::from((ty - ny).abs())
                 - i32::from((px - nx).abs())
                 - i32::from((py - ny).abs())
                 + 1
@@ -338,7 +336,6 @@ fn best_insertion_for_worker(
     best
 }
 
-
 #[allow(
     clippy::cast_possible_truncation,
     clippy::float_cmp,
@@ -380,7 +377,9 @@ pub(crate) fn solve_routes_core(
         || previous_task.len() != worker_count
         || inventories.len() != worker_count.saturating_mul(INVENTORY_ITEMS)
     {
-        return Err(PyValueError::new_err("route worker slices have inconsistent lengths"));
+        return Err(PyValueError::new_err(
+            "route worker slices have inconsistent lengths",
+        ));
     }
     if exclusive.len() != task_count
         || priorities.len() != task_count
@@ -394,7 +393,9 @@ pub(crate) fn solve_routes_core(
         || task_zone.len() != task_count
         || reserved_by_kind.len() != 14
     {
-        return Err(PyValueError::new_err("route task slices have inconsistent lengths"));
+        return Err(PyValueError::new_err(
+            "route task slices have inconsistent lengths",
+        ));
     }
     let mut routes = vec![Vec::<usize>::new(); worker_count];
     if worker_count == 0 {
@@ -412,9 +413,7 @@ pub(crate) fn solve_routes_core(
         .iter()
         .map(|&task| urgency(priorities[task]))
         .collect::<Vec<_>>();
-    urgency_bands.sort_by(|left, right| {
-        right.partial_cmp(left).unwrap_or(Ordering::Equal)
-    });
+    urgency_bands.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
     urgency_bands.dedup_by(|left, right| *left == *right);
 
     let mut prefix_length = vec![0_usize; worker_count];
@@ -492,7 +491,8 @@ pub(crate) fn solve_routes_core(
                 }
                 let distance = i32::from((target_x[task] - start_x).abs())
                     + i32::from((target_y[task] - start_y).abs());
-                best_distance = Some(best_distance.map_or(distance, |current| current.min(distance)));
+                best_distance =
+                    Some(best_distance.map_or(distance, |current| current.min(distance)));
             }
 
             if let Some(distance) = best_distance {
@@ -678,7 +678,9 @@ pub(crate) fn schedule_routes<'py>(
 
     let task_shape = active_tasks.shape();
     if task_shape.len() != 1 {
-        return Err(PyValueError::new_err("active_tasks must be one-dimensional"));
+        return Err(PyValueError::new_err(
+            "active_tasks must be one-dimensional",
+        ));
     }
     let task_count = task_shape[0];
     for (name, shape) in [
@@ -736,7 +738,9 @@ pub(crate) fn schedule_routes<'py>(
         ("previous_task", previous_task.is_c_contiguous()),
     ] {
         if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+            return Err(PyValueError::new_err(format!(
+                "{name} must be C-contiguous"
+            )));
         }
     }
 
@@ -811,8 +815,7 @@ pub(crate) fn schedule_routes<'py>(
             route
                 .into_iter()
                 .map(|task| {
-                    i64::try_from(task)
-                        .map_err(|_| PyValueError::new_err("task index exceeds i64"))
+                    i64::try_from(task).map_err(|_| PyValueError::new_err("task index exceeds i64"))
                 })
                 .collect::<PyResult<Vec<_>>>()
         })

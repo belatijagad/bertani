@@ -117,7 +117,9 @@ def collect_rollout(
 
         _synchronize(device, config.profile)
         started = time.perf_counter()
-        device_observation = observation.to_device(device)
+        device_observation = observation.to_device(
+            device, channels_last=config.channels_last and device.type == "cuda"
+        )
         device_action_info = action_info.to_device(device)
         _synchronize(device, config.profile)
         timings["device_transfer"] += time.perf_counter() - started
@@ -138,12 +140,23 @@ def collect_rollout(
         timings["policy_forward"] += time.perf_counter() - started
 
         started = time.perf_counter()
+        # Pack worker actions before the device transfer. This avoids copying
+        # operations and arguments once for PPO storage and again for the env.
+        device_unit_actions = output.to_unit_actions()
+        packed_actions = torch.cat(
+            (
+                device_unit_actions.flatten(start_dim=1),
+                output.target_hands.unsqueeze(-1),
+            ),
+            dim=-1,
+        ).cpu()
+        unit_action_tensor = packed_actions[:, :-1].reshape_as(device_unit_actions)
         sampled_actions = PPOActions(
-            output.operations.cpu(),
-            output.arguments.cpu(),
-            output.target_hands.cpu(),
+            unit_action_tensor[..., 0],
+            unit_action_tensor[..., 1],
+            packed_actions[:, -1],
         )
-        unit_actions = output.to_unit_actions().cpu().numpy()
+        unit_actions = unit_action_tensor.numpy()
         timings["action_transfer"] += time.perf_counter() - started
 
         started = time.perf_counter()
@@ -167,8 +180,11 @@ def collect_rollout(
         observations.append(observation)
         action_information.append(action_info)
         actions.append(sampled_actions)
-        old_log_probs.append(joint_log_probs.float().cpu())
-        values.append(output.value.float().cpu())
+        policy_values = (
+            torch.stack((joint_log_probs, output.value), dim=-1).float().cpu()
+        )
+        old_log_probs.append(policy_values[..., 0])
+        values.append(policy_values[..., 1])
         started = time.perf_counter()
         rewards.append(reward.transition(self_play, self_play.batch))
         learner_dones = self_play.learner_dones().astype(bool, copy=True)
@@ -200,7 +216,9 @@ def collect_rollout(
     timings["observation"] += time.perf_counter() - started
     _synchronize(device, config.profile)
     started = time.perf_counter()
-    bootstrap_observation = bootstrap_observation.to_device(device)
+    bootstrap_observation = bootstrap_observation.to_device(
+        device, channels_last=config.channels_last and device.type == "cuda"
+    )
     bootstrap_action_info = bootstrap_action_info.to_device(device)
     _synchronize(device, config.profile)
     timings["device_transfer"] += time.perf_counter() - started

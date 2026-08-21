@@ -40,6 +40,7 @@ class _V9State:
     r9_last_step: int = -1
     v8_commit: object = None
     v8_last_step: int = -1
+    town_fingerprint: tuple[int, int] | None = None
 
     def values(self) -> tuple[object, ...]:
         return (
@@ -51,9 +52,17 @@ class _V9State:
         )
 
     @classmethod
-    def from_module(cls, module: ModuleType) -> _V9State:
+    def from_module(
+        cls,
+        module: ModuleType,
+        *,
+        town_fingerprint: tuple[int, int],
+    ) -> _V9State:
         values = [getattr(module, name) for name in _STATE_NAMES]
-        return cls(*values)
+        return cls(*values, town_fingerprint=town_fingerprint)
+
+    def copy(self) -> _V9State:
+        return _V9State(*self.values(), town_fingerprint=self.town_fingerprint)
 
 
 @dataclass(frozen=True)
@@ -72,14 +81,6 @@ class SelfPlayStepProfile:
     composition_seconds: float = 0.0
     environment_seconds: float = 0.0
     total_seconds: float = 0.0
-
-
-def _freeze(value: object) -> object:
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, dict):
-        return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
-    return value
 
 
 def _unit_row(raw: Sequence[object] | None) -> tuple[int, int, int]:
@@ -177,28 +178,29 @@ class V9OpponentPolicy:
         # The cache is deliberately scoped to one synchronous vector step. It
         # captures duplicated openings without retaining full farm signatures.
         cache: dict[object, tuple[np.ndarray, np.ndarray, int, _V9State]] = {}
+        fingerprints = environment.v9_fingerprints(seats)
 
         for environment_index in range(environment.num_envs):
             seat = int(seats[environment_index])
-            snapshot = environment.state_snapshot(environment_index)
             state = self._states[environment_index]
-            step = int(snapshot["step"])
-            raw_farm = snapshot["farms"][seat]
-            staff = 1 + len(raw_farm["hands"])
+            row = fingerprints[environment_index]
+            state_fingerprint = (int(row[0]), int(row[1]))
+            town_fingerprint = (int(row[2]), int(row[3]))
+            step = int(row[4])
+            staff = int(row[5])
             rows = (
                 self.module._R9_BANK[step].get(staff, ())
                 if 0 <= step < len(self.module._R9_BANK)
                 else ()
             )
-            observation = snapshot_observation(
-                snapshot, seat, include_opponent=not bool(rows)
+            effective_mode = (
+                5
+                if town_fingerprint != state.town_fingerprint
+                else state.r9_mode
             )
-            town = tuple(observation["town"]["unlocked_shops"])
-            feature = self.module._feature(observation)
-            effective_mode = 5 if town != state.r9_last_town else state.r9_mode
             key = None
             if self.cache_identical_states and rows:
-                key = (step, town, effective_mode, _freeze(feature))
+                key = (state_fingerprint, town_fingerprint, effective_mode)
                 cached = cache.get(key)
                 if cached is not None:
                     units, market, market_length, post_state = cached
@@ -211,12 +213,15 @@ class V9OpponentPolicy:
                         market,
                         market_length,
                     )
-                    self._states[environment_index] = _V9State(
-                        *post_state.values()
-                    )
+                    self._states[environment_index] = post_state.copy()
                     self._hits += 1
                     continue
 
+            snapshot = environment.state_snapshot(environment_index)
+            observation = snapshot_observation(
+                snapshot, seat, include_opponent=not bool(rows)
+            )
+            feature = self.module._feature(observation)
             self._restore_state(state)
             original_feature = self.module._feature
             if rows:
@@ -228,7 +233,9 @@ class V9OpponentPolicy:
                 raw = self.module.agent(observation, self.configuration) or {}
             finally:
                 self.module._feature = original_feature
-            post_state = _V9State.from_module(self.module)
+            post_state = _V9State.from_module(
+                self.module, town_fingerprint=town_fingerprint
+            )
             self._states[environment_index] = post_state
             units, market, market_length = self._encode(raw)
             self._write_encoded(

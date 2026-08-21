@@ -21,6 +21,13 @@ class PPOConfig:
     normalize_advantages: bool = True
     include_workforce: bool = True
     mixed_precision: bool = True
+    compile_model: bool = True
+    compile_mode: str = "default"
+    channels_last: bool = True
+    fused_optimizer: bool = True
+    preload_rollout: bool = True
+    allow_tf32: bool = True
+    cudnn_benchmark: bool = True
     profile: bool = False
 
     def __post_init__(self) -> None:
@@ -46,6 +53,16 @@ class PPOConfig:
             raise ValueError("loss coefficients cannot be negative")
         if self.max_gradient_norm is not None and self.max_gradient_norm <= 0.0:
             raise ValueError("max_gradient_norm must be positive or None")
+        compile_modes = {
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        }
+        if self.compile_mode not in compile_modes:
+            raise ValueError(
+                f"compile_mode must be one of {', '.join(sorted(compile_modes))}"
+            )
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

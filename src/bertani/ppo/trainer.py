@@ -48,6 +48,14 @@ class PPOStats:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class _MinibatchResult:
+    metrics: torch.Tensor
+    forward_seconds: float
+    backward_seconds: float
+    optimizer_seconds: float
+
+
 class PPOTrainer:
     """Own optimizer state and update an actor-critic from CPU rollouts."""
 
@@ -63,13 +71,24 @@ class PPOTrainer:
         self.config = config
         self.device = torch.device(device)
         self.model.to(self.device)
+        if self.device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = config.allow_tf32
+            torch.backends.cudnn.allow_tf32 = config.allow_tf32
+            torch.backends.cudnn.benchmark = config.cudnn_benchmark
+            if config.allow_tf32:
+                torch.set_float32_matmul_precision("high")
+            if config.channels_last:
+                self.model.to(memory_format=torch.channels_last)
         self.optimizer = optimizer or torch.optim.Adam(
             model.parameters(),
             lr=config.learning_rate,
             eps=config.adam_epsilon,
+            fused=config.fused_optimizer and self.device.type == "cuda",
         )
         use_scaler = config.mixed_precision and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+        if config.compile_model and self.device.type == "cuda":
+            self.model.compile(mode=config.compile_mode, dynamic=False)
         self.updates = 0
 
     def update(
@@ -97,36 +116,67 @@ class PPOTrainer:
         training = rollout.training_batch(advantages, returns)
         prepare_seconds = time.perf_counter() - prepare_started
         sample_count = rollout.steps * rollout.environments
-        accumulated: list[dict[str, float]] = []
+        accumulated: list[_MinibatchResult] = []
         device_transfer_seconds = 0.0
+        on_device = self.config.preload_rollout and self.device.type == "cuda"
+        if on_device:
+            self._synchronize()
+            transfer_started = time.perf_counter()
+            training = training.to_device(
+                self.device,
+                channels_last=self.config.channels_last,
+            )
+            self._synchronize()
+            device_transfer_seconds += time.perf_counter() - transfer_started
         for _ in range(self.config.epochs_per_update):
-            permutation = torch.randperm(sample_count)
+            permutation = torch.randperm(
+                sample_count,
+                device=self.device if on_device else "cpu",
+            )
             for start in range(0, sample_count, self.config.minibatch_size):
                 indices = permutation[start : start + self.config.minibatch_size]
-                self._synchronize()
-                transfer_started = time.perf_counter()
-                minibatch = training.index(indices).to_device(self.device)
-                self._synchronize()
-                device_transfer_seconds += time.perf_counter() - transfer_started
+                if on_device:
+                    minibatch = training.index(indices)
+                else:
+                    self._synchronize()
+                    transfer_started = time.perf_counter()
+                    minibatch = training.index(indices).to_device(
+                        self.device,
+                        channels_last=(
+                            self.config.channels_last and self.device.type == "cuda"
+                        ),
+                    )
+                    self._synchronize()
+                    device_transfer_seconds += time.perf_counter() - transfer_started
                 accumulated.append(self._update_minibatch(minibatch))
                 if minibatch_callback is not None:
                     minibatch_callback()
         self.updates += 1
-        self._synchronize()
+        # One D2H copy replaces several implicit float(cuda_tensor)
+        # synchronizations for every minibatch.
+        metric_values = (
+            torch.stack([batch.metrics for batch in accumulated])
+            .float()
+            .mean(dim=0)
+            .cpu()
+            .tolist()
+        )
         update_seconds = time.perf_counter() - update_started
-
-        def mean(key: str) -> float:
-            return sum(batch[key] for batch in accumulated) / len(accumulated)
-
-        def total(key: str) -> float:
-            return sum(batch[key] for batch in accumulated)
+        (
+            total_loss,
+            actor_loss,
+            critic_loss,
+            entropy,
+            clip_fraction,
+            approximate_kl,
+            gradient_norm,
+        ) = metric_values
 
         flat_returns = returns.flatten()
         flat_values = rollout.values[:-1].flatten()
         return_variance = flat_returns.var(unbiased=False)
         explained_variance = (
-            1.0
-            - (flat_returns - flat_values).var(unbiased=False) / return_variance
+            1.0 - (flat_returns - flat_values).var(unbiased=False) / return_variance
             if float(return_variance) > 0.0
             else torch.zeros(())
         )
@@ -138,13 +188,13 @@ class PPOTrainer:
         )
 
         return PPOStats(
-            total_loss=mean("total_loss"),
-            policy_loss=mean("policy_loss"),
-            value_loss=mean("value_loss"),
-            entropy=mean("entropy"),
-            clip_fraction=mean("clip_fraction"),
-            approximate_kl=mean("approximate_kl"),
-            gradient_norm=mean("gradient_norm"),
+            total_loss=total_loss,
+            policy_loss=actor_loss,
+            value_loss=critic_loss,
+            entropy=entropy,
+            clip_fraction=clip_fraction,
+            approximate_kl=approximate_kl,
+            gradient_norm=gradient_norm,
             reward_mean=float(rollout.rewards.mean()),
             advantage_mean=float(advantages.mean()),
             return_mean=float(returns.mean()),
@@ -153,16 +203,19 @@ class PPOTrainer:
             samples_per_second=processed_samples / max(update_seconds, 1e-9),
             prepare_seconds=prepare_seconds,
             device_transfer_seconds=device_transfer_seconds,
-            forward_seconds=total("forward_seconds"),
-            backward_seconds=total("backward_seconds"),
-            optimizer_seconds=total("optimizer_seconds"),
+            forward_seconds=sum(batch.forward_seconds for batch in accumulated),
+            backward_seconds=sum(batch.backward_seconds for batch in accumulated),
+            optimizer_seconds=sum(batch.optimizer_seconds for batch in accumulated),
             update_seconds=update_seconds,
             peak_gpu_memory_mb=peak_gpu_memory_mb,
             profile_synchronized=float(self.config.profile),
         )
 
-    def _update_minibatch(self, batch: TrainingBatch) -> dict[str, float]:
+    def _update_minibatch(self, batch: TrainingBatch) -> _MinibatchResult:
         use_amp = self.scaler.is_enabled()
+        # Release the preceding minibatch's gradient buffers before allocating
+        # the next forward activations.
+        self.optimizer.zero_grad(set_to_none=True)
         self._synchronize()
         forward_started = time.perf_counter()
         with torch.autocast(
@@ -202,7 +255,6 @@ class PPOTrainer:
         self._synchronize()
         forward_seconds = time.perf_counter() - forward_started
 
-        self.optimizer.zero_grad(set_to_none=True)
         self._synchronize()
         backward_started = time.perf_counter()
         self.scaler.scale(total_loss).backward()
@@ -224,21 +276,27 @@ class PPOTrainer:
 
         with torch.no_grad():
             clip_fraction = (
-                (probability_ratio - 1.0).abs() > self.config.clip_coefficient
-            ).float().mean()
+                ((probability_ratio - 1.0).abs() > self.config.clip_coefficient)
+                .float()
+                .mean()
+            )
             approximate_kl = ((probability_ratio - 1.0) - log_ratio).mean()
-        return {
-            "total_loss": float(total_loss.detach()),
-            "policy_loss": float(actor_loss.detach()),
-            "value_loss": float(critic_loss.detach()),
-            "entropy": float(entropy.detach()),
-            "clip_fraction": float(clip_fraction),
-            "approximate_kl": float(approximate_kl),
-            "gradient_norm": float(gradient_norm),
-            "forward_seconds": forward_seconds,
-            "backward_seconds": backward_seconds,
-            "optimizer_seconds": optimizer_seconds,
-        }
+        return _MinibatchResult(
+            metrics=torch.stack(
+                (
+                    total_loss.detach(),
+                    actor_loss.detach(),
+                    critic_loss.detach(),
+                    entropy.detach(),
+                    clip_fraction.detach(),
+                    approximate_kl.detach(),
+                    gradient_norm.detach(),
+                )
+            ),
+            forward_seconds=forward_seconds,
+            backward_seconds=backward_seconds,
+            optimizer_seconds=optimizer_seconds,
+        )
 
     def _synchronize(self) -> None:
         if self.config.profile and self.device.type == "cuda":

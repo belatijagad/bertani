@@ -64,10 +64,20 @@ def test_v9_policy_shares_bank_and_caches_symmetric_openings() -> None:
     module = _fake_v9()
     policy = _policy(module, environment)
     seats = np.asarray([1, 0, 1, 0], dtype=np.int64)
+    snapshot_calls = 0
+    state_snapshot = environment.state_snapshot
+
+    def counted_snapshot(index: int) -> dict[str, object]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return state_snapshot(index)
+
+    environment.state_snapshot = counted_snapshot  # type: ignore[method-assign]
 
     actions = policy.act(environment, batch, seats=seats)
 
     assert module.calls == 1
+    assert snapshot_calls == 1
     assert policy.cache_stats.hits == 3
     assert policy.cache_stats.misses == 1
     np.testing.assert_array_equal(

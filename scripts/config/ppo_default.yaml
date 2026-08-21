@@ -1,13 +1,24 @@
 # Training
-max_updates: 1_000
+max_updates: 100
 optimizer_kwargs:
   lr: 1e-4
   eps: 0.000_3
 clip_gradients: 10.0
-steps_per_update: 32
+steps_per_update: 64
 epochs_per_update: 1
-train_batch_size: 128
+train_batch_size: 1024
 use_mixed_precision: true
+
+gpu_config:
+  compile_model: true
+  # default has much lower warm-up cost on consumer GPUs. Larger accelerators
+  # can try max-autotune-no-cudagraphs for long runs.
+  compile_mode: default
+  channels_last: true
+  fused_optimizer: true
+  preload_rollout: true
+  allow_tf32: true
+  cudnn_benchmark: true
 
 # PPO
 gamma: 0.9999
@@ -20,7 +31,7 @@ normalize_advantages: true
 include_workforce: true
 
 env_config:
-  n_envs: 32
+  n_envs: 512
   seed: 2026
 
 self_play_config:

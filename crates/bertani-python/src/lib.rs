@@ -10,9 +10,9 @@ mod production_tasks;
 mod route_scheduler;
 mod rule_features;
 mod scheduler_controller;
-mod workforce;
 mod snapshot;
 mod vec_env;
+mod workforce;
 
 use pyo3::prelude::*;
 

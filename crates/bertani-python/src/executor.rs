@@ -105,7 +105,9 @@ pub(crate) fn execute_assignments<'py>(
         ("out_unit_actions", out_unit_actions.is_c_contiguous()),
     ] {
         if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+            return Err(PyValueError::new_err(format!(
+                "{name} must be C-contiguous"
+            )));
         }
     }
 
@@ -118,13 +120,19 @@ pub(crate) fn execute_assignments<'py>(
     let max_units = unit_shape[3];
 
     if active_units.shape() != [num_envs, players, max_units] {
-        return Err(PyValueError::new_err("active_units shape does not match units"));
+        return Err(PyValueError::new_err(
+            "active_units shape does not match units",
+        ));
     }
     if task_index.shape() != [num_envs, players, max_units] {
-        return Err(PyValueError::new_err("task_index shape does not match units"));
+        return Err(PyValueError::new_err(
+            "task_index shape does not match units",
+        ));
     }
     if out_unit_actions.shape() != [num_envs, players, max_units, 3] {
-        return Err(PyValueError::new_err("unit action output has incompatible shape"));
+        return Err(PyValueError::new_err(
+            "unit action output has incompatible shape",
+        ));
     }
 
     let task_shape = task_kind.shape();
@@ -139,7 +147,9 @@ pub(crate) fn execute_assignments<'py>(
         ("task_quantity", task_quantity.shape()),
     ] {
         if shape != task_shape {
-            return Err(PyValueError::new_err(format!("{name} shape does not match task_kind")));
+            return Err(PyValueError::new_err(format!(
+                "{name} shape does not match task_kind"
+            )));
         }
     }
 
@@ -248,8 +258,16 @@ pub(crate) fn execute_assignments<'py>(
                     && (unit_x == low_center || unit_x == high_center)
                     && (unit_y == low_center || unit_y == high_center);
                 if deposit {
-                    target_x = if unit_x <= low_center { low_center } else { high_center };
-                    target_y = if unit_y <= low_center { low_center } else { high_center };
+                    target_x = if unit_x <= low_center {
+                        low_center
+                    } else {
+                        high_center
+                    };
+                    target_y = if unit_y <= low_center {
+                        low_center
+                    } else {
+                        high_center
+                    };
                 }
 
                 let moving = !at_shed && (unit_x != target_x || unit_y != target_y);

@@ -41,9 +41,14 @@ class TrainingBatch:
             returns=self.returns[index],
         )
 
-    def to_device(self, device: torch.device | str) -> TrainingBatch:
+    def to_device(
+        self,
+        device: torch.device | str,
+        *,
+        channels_last: bool = False,
+    ) -> TrainingBatch:
         return TrainingBatch(
-            observation=self.observation.to_device(device),
+            observation=self.observation.to_device(device, channels_last=channels_last),
             action_info=self.action_info.to_device(device),
             actions=self.actions.to_device(device),
             old_log_probs=self.old_log_probs.to(device, non_blocking=True),
@@ -88,7 +93,10 @@ class RolloutBatch:
         returns: torch.Tensor,
     ) -> TrainingBatch:
         self.validate()
-        if advantages.shape != self.rewards.shape or returns.shape != self.rewards.shape:
+        if (
+            advantages.shape != self.rewards.shape
+            or returns.shape != self.rewards.shape
+        ):
             raise ValueError("advantage and return shapes must match rewards")
         samples = self.steps * self.environments
 
@@ -96,8 +104,12 @@ class RolloutBatch:
             return value.reshape(samples, *value.shape[2:])
 
         return TrainingBatch(
-            observation=TorchObservation(*(flatten(value) for value in self.observation)),
-            action_info=TorchActionInfo(*(flatten(value) for value in self.action_info)),
+            observation=TorchObservation(
+                *(flatten(value) for value in self.observation)
+            ),
+            action_info=TorchActionInfo(
+                *(flatten(value) for value in self.action_info)
+            ),
             actions=PPOActions(*(flatten(value) for value in self.actions)),
             old_log_probs=self.old_log_probs.reshape(samples),
             advantages=advantages.reshape(samples),

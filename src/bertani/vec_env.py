@@ -261,6 +261,7 @@ class VecEnv:
         self._episode_ids = np.empty((n,), dtype=np.uint64)
         self._overflow_bytes = np.zeros((n, 2), dtype=np.uint8)
         self._overflow = self._overflow_bytes.view(np.bool_)
+        self._v9_fingerprint_buffer = np.empty((n, 6), dtype=np.uint64)
 
         # These immutable defaults avoid allocating pass actions per step.
         self._pass_unit_actions = np.zeros((n, 2, units, 3), dtype=np.int64)
@@ -443,6 +444,24 @@ class VecEnv:
         """Return a JSON-compatible copy of the current state for one slot."""
 
         return self._native.state_snapshot(index)
+
+    def v9_fingerprints(
+        self, seats: NDArray[np.int64]
+    ) -> NDArray[np.uint64]:
+        """Hash V9-relevant state for every slot without building Python dicts.
+
+        The returned storage is owned and reused by this environment. Consumers
+        must finish reading it before the next call.
+        """
+
+        seats = _require_array(
+            seats,
+            name="seats",
+            shape=(self.num_envs,),
+            dtype=np.dtype(np.int64),
+        )
+        self._native.v9_fingerprints(seats, self._v9_fingerprint_buffer)
+        return self._v9_fingerprint_buffer
 
     def terminal_snapshot(self, index: int) -> dict[str, Any] | None:
         """Return the last terminal state retained by auto-reset, if any."""

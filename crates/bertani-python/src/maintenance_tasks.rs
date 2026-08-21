@@ -13,7 +13,9 @@
     clippy::cast_sign_loss
 )]
 
-use numpy::{PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
+use numpy::{
+    PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -386,11 +388,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
             let mut pending_wheat_buy = 0_i64;
             for order in 0..requested_orders {
                 if market_actions[[environment, player, order, 0]] == MARKET_BUY_PRODUCT
-                    && market_actions[[environment, player, order, 1]]
-                        == i64::from(ITEM_WHEAT)
+                    && market_actions[[environment, player, order, 1]] == i64::from(ITEM_WHEAT)
                 {
-                    pending_wheat_buy +=
-                        market_actions[[environment, player, order, 2]].max(0);
+                    pending_wheat_buy += market_actions[[environment, player, order, 2]].max(0);
                 }
             }
 
@@ -651,10 +651,7 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                     .min(feed_distances.len());
                 let pending_distances = &feed_distances[..feasible_count];
 
-                let stage_quantities = [
-                    (pending_feed_wheat + 1) / 2,
-                    pending_feed_wheat / 2,
-                ];
+                let stage_quantities = [(pending_feed_wheat + 1) / 2, pending_feed_wheat / 2];
                 let mut distance_cursor = 0_usize;
 
                 for (index, extra_slot) in [0_usize, 3_usize].into_iter().enumerate() {
@@ -677,11 +674,9 @@ pub(crate) fn propose_maintenance_tasks<'py>(
                         .unwrap_or(0);
                     distance_cursor = end;
 
-                    let latest_stage_hour =
-                        i64::from(deadline) - max_feed_distance - 2;
+                    let latest_stage_hour = i64::from(deadline) - max_feed_distance - 2;
                     let stage_active = latest_stage_hour >= hour;
-                    let stage_deadline = i16::try_from(latest_stage_hour)
-                        .unwrap_or(-1);
+                    let stage_deadline = i16::try_from(latest_stage_hour).unwrap_or(-1);
 
                     set_global(
                         &mut out,

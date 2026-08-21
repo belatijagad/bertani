@@ -302,11 +302,7 @@ fn select_limited_by_distance(
                     return None;
                 }
                 Some((
-                    (
-                        geometry.tie_y[index],
-                        geometry.tie_x[index],
-                        index,
-                    ),
+                    (geometry.tie_y[index], geometry.tie_x[index], index),
                     quadrant,
                     index,
                 ))
@@ -356,7 +352,9 @@ pub(crate) fn propose_production_tasks<'py>(
     episode_steps: i64,
 ) -> PyResult<()> {
     if board_size == 0 || turns_per_day <= 0 || shed_capacity <= 0 || episode_steps <= 0 {
-        return Err(PyValueError::new_err("production configuration must be positive"));
+        return Err(PyValueError::new_err(
+            "production configuration must be positive",
+        ));
     }
     if tile_slots != board_size.saturating_mul(board_size) {
         return Err(PyValueError::new_err("tile_slots must equal board_size**2"));
@@ -378,7 +376,9 @@ pub(crate) fn propose_production_tasks<'py>(
 
     let global_shape = global_features.shape();
     if global_shape.len() != 3 || global_shape[0] != num_envs || global_shape[1] != players {
-        return Err(PyValueError::new_err("global_features batch shape does not match tiles"));
+        return Err(PyValueError::new_err(
+            "global_features batch shape does not match tiles",
+        ));
     }
     let unit_shape = units.shape();
     if unit_shape.len() != 5
@@ -387,11 +387,15 @@ pub(crate) fn propose_production_tasks<'py>(
         || unit_shape[2] < 1
         || unit_shape[4] < UNIT_INVENTORY_START + ITEM_COUNT
     {
-        return Err(PyValueError::new_err("units shape is incompatible with production tasks"));
+        return Err(PyValueError::new_err(
+            "units shape is incompatible with production tasks",
+        ));
     }
     let max_units = unit_shape[3];
     if active_units.shape() != [num_envs, players, max_units] {
-        return Err(PyValueError::new_err("active_units shape does not match units"));
+        return Err(PyValueError::new_err(
+            "active_units shape does not match units",
+        ));
     }
     if seat_mask.shape() != [num_envs, players] {
         return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
@@ -402,13 +406,19 @@ pub(crate) fn propose_production_tasks<'py>(
         || private_shape[1] != players
         || private_shape[2] < PRIVATE_SEED_START + CROP_COUNT
     {
-        return Err(PyValueError::new_err("private shape is incompatible with production tasks"));
+        return Err(PyValueError::new_err(
+            "private shape is incompatible with production tasks",
+        ));
     }
     if target_crop_counts.shape() != [num_envs, players, CROP_COUNT] {
-        return Err(PyValueError::new_err("target_crop_counts must have shape [N, P, 5]"));
+        return Err(PyValueError::new_err(
+            "target_crop_counts must have shape [N, P, 5]",
+        ));
     }
     if target_animal_counts.shape() != [num_envs, players, ANIMAL_COUNT] {
-        return Err(PyValueError::new_err("target_animal_counts must have shape [N, P, 3]"));
+        return Err(PyValueError::new_err(
+            "target_animal_counts must have shape [N, P, 3]",
+        ));
     }
     if liquidate.shape() != [num_envs, players] {
         return Err(PyValueError::new_err("liquidate must have shape [N, P]"));
@@ -433,7 +443,9 @@ pub(crate) fn propose_production_tasks<'py>(
     }
     let output_shape = task_active.shape();
     if output_shape.len() != 3 || output_shape[0] != num_envs || output_shape[1] != players {
-        return Err(PyValueError::new_err("task batch shape does not match observations"));
+        return Err(PyValueError::new_err(
+            "task batch shape does not match observations",
+        ));
     }
     let capacity = output_shape[2];
     if capacity <= tile_slots + 2 {
@@ -470,14 +482,19 @@ pub(crate) fn propose_production_tasks<'py>(
         ("task_quantity", task_quantity.is_c_contiguous()),
         ("task_priority", task_priority.is_c_contiguous()),
         ("task_deadline", task_deadline.is_c_contiguous()),
-        ("task_estimated_value", task_estimated_value.is_c_contiguous()),
+        (
+            "task_estimated_value",
+            task_estimated_value.is_c_contiguous(),
+        ),
         ("task_required_item", task_required_item.is_c_contiguous()),
         ("task_required_count", task_required_count.is_c_contiguous()),
         ("task_exclusive", task_exclusive.is_c_contiguous()),
         ("task_work_role", task_work_role.is_c_contiguous()),
     ] {
         if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+            return Err(PyValueError::new_err(format!(
+                "{name} must be C-contiguous"
+            )));
         }
     }
 
@@ -553,9 +570,7 @@ pub(crate) fn propose_production_tasks<'py>(
             let seat_base = (environment * players + player) * capacity;
             let requested_orders = market_lengths[[environment, player]];
             let Ok(requested_orders) = usize::try_from(requested_orders) else {
-                return Err(PyValueError::new_err(
-                    "market length cannot be negative",
-                ));
+                return Err(PyValueError::new_err("market length cannot be negative"));
             };
             if requested_orders > max_market_orders {
                 return Err(PyValueError::new_err(
@@ -618,8 +633,7 @@ pub(crate) fn propose_production_tasks<'py>(
                         crop_counts[crop] += i64::from(tile(TILE_CROP_START + crop) > 0.5);
                     }
                     for animal in 0..ANIMAL_COUNT {
-                        animal_counts[animal] +=
-                            i64::from(tile(TILE_ANIMAL_START + animal) > 0.5);
+                        animal_counts[animal] += i64::from(tile(TILE_ANIMAL_START + animal) > 0.5);
                     }
                     pasture_count += i64::from(existing_pastures[slot]);
 
@@ -635,7 +649,11 @@ pub(crate) fn propose_production_tasks<'py>(
             }
 
             let weed_count = weed.iter().filter(|&&value| value).count() as i64;
-            let weed_priority = if day >= 22 && weed_count >= 4 { 109.0 } else { 99.0 };
+            let weed_priority = if day >= 22 && weed_count >= 4 {
+                109.0
+            } else {
+                99.0
+            };
             for slot in 0..tile_slots {
                 if weed[slot] {
                     propose_tile(
@@ -669,10 +687,8 @@ pub(crate) fn propose_production_tasks<'py>(
             let mut build_candidates = vec![false; tile_slots];
             for slot in 0..tile_slots {
                 let rank = geometry.pasture_rank[slot];
-                build_candidates[slot] = productive
-                    && empty_tile[slot]
-                    && rank >= 0
-                    && rank < target_pastures;
+                build_candidates[slot] =
+                    productive && empty_tile[slot] && rank >= 0 && rank < target_pastures;
             }
             let build = select_limited_by_distance(
                 &build_candidates,
@@ -839,7 +855,11 @@ pub(crate) fn propose_production_tasks<'py>(
             ] {
                 let crop_index = crop as usize;
                 let surplus = (seeds[crop_index] - planned_seed_use[crop_index]).max(0);
-                let available = if remaining_days > maturity_days { surplus } else { 0 };
+                let available = if remaining_days > maturity_days {
+                    surplus
+                } else {
+                    0
+                };
                 let candidates = empty
                     .iter()
                     .zip(&claimed)
@@ -942,12 +962,10 @@ pub(crate) fn propose_production_tasks<'py>(
                 private[[environment, player, ITEM_SHEEP as usize]],
                 shed_scale,
             );
-            let cow_deficit = (target_animal_counts[[environment, player, 1]]
-                - animal_counts[1])
-                .max(0);
-            let sheep_deficit = (target_animal_counts[[environment, player, 2]]
-                - animal_counts[2])
-                .max(0);
+            let cow_deficit =
+                (target_animal_counts[[environment, player, 1]] - animal_counts[1]).max(0);
+            let sheep_deficit =
+                (target_animal_counts[[environment, player, 2]] - animal_counts[2]).max(0);
             // Fetch only animals that have somewhere to go.  This prevents a
             // logistics worker from picking up a cow/sheep and carrying it around
             // when every pasture is occupied or already claimed by a carried animal.
@@ -963,10 +981,8 @@ pub(crate) fn propose_production_tasks<'py>(
 
             let cow_needed = cow_deficit > 0;
             let sheep_needed = sheep_deficit > 0;
-            let fetch_cow = cow_needed
-                && shed_cow > 0
-                && carried_cow == 0
-                && placement_capacity > 0;
+            let fetch_cow =
+                cow_needed && shed_cow > 0 && carried_cow == 0 && placement_capacity > 0;
             let fetch_sheep = !fetch_cow
                 && sheep_needed
                 && shed_sheep > 0

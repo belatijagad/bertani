@@ -96,6 +96,7 @@ def load_experiment_config(
         "epochs_per_update",
         "train_batch_size",
         "use_mixed_precision",
+        "gpu_config",
         "gamma",
         "gae_lambda",
         "clip_coefficient",
@@ -120,6 +121,17 @@ def load_experiment_config(
     _exact_fields(optimizer, {"lr", "eps"}, "optimizer_kwargs")
     losses = _mapping(raw["loss_coefficients"], "loss_coefficients")
     _exact_fields(losses, {"value", "entropy"}, "loss_coefficients")
+    gpu = _mapping(raw["gpu_config"], "gpu_config")
+    gpu_fields = {
+        "compile_model",
+        "compile_mode",
+        "channels_last",
+        "fused_optimizer",
+        "preload_rollout",
+        "allow_tf32",
+        "cudnn_benchmark",
+    }
+    _exact_fields(gpu, gpu_fields, "gpu_config")
     environment = _mapping(raw["env_config"], "env_config")
     _exact_fields(environment, {"n_envs", "seed"}, "env_config")
     self_play = _mapping(raw["self_play_config"], "self_play_config")
@@ -154,6 +166,13 @@ def load_experiment_config(
         ),
         include_workforce=_boolean(raw["include_workforce"], "include_workforce"),
         mixed_precision=_boolean(raw["use_mixed_precision"], "use_mixed_precision"),
+        compile_model=_boolean(gpu["compile_model"], "gpu_config.compile_model"),
+        compile_mode=str(gpu["compile_mode"]),
+        channels_last=_boolean(gpu["channels_last"], "gpu_config.channels_last"),
+        fused_optimizer=_boolean(gpu["fused_optimizer"], "gpu_config.fused_optimizer"),
+        preload_rollout=_boolean(gpu["preload_rollout"], "gpu_config.preload_rollout"),
+        allow_tf32=_boolean(gpu["allow_tf32"], "gpu_config.allow_tf32"),
+        cudnn_benchmark=_boolean(gpu["cudnn_benchmark"], "gpu_config.cudnn_benchmark"),
         profile=_boolean(raw["profile"], "profile"),
     )
     model = ActorCriticConfig(**model_values)

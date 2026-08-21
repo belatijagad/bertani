@@ -115,9 +115,11 @@ class TorchObservation(NamedTuple):
             ),
             dim=-1,
         )
-        workers = torch.from_numpy(units).reshape(
-            flat_batch, units.shape[-2], units.shape[-1]
-        ).contiguous()
+        workers = (
+            torch.from_numpy(units)
+            .reshape(flat_batch, units.shape[-2], units.shape[-1])
+            .contiguous()
+        )
 
         # Unit channels 2 and 3 are normalized x and y coordinates. Inactive
         # rows may contain placeholder values; force them to the harmless
@@ -140,9 +142,22 @@ class TorchObservation(NamedTuple):
         device: torch.device | str,
         *,
         non_blocking: bool = True,
+        channels_last: bool = False,
     ) -> TorchObservation:
+        spatial = self.spatial.to(
+            device,
+            non_blocking=non_blocking,
+            memory_format=(
+                torch.channels_last if channels_last else torch.preserve_format
+            ),
+        )
         return TorchObservation(
-            *(value.to(device, non_blocking=non_blocking) for value in self)
+            spatial=spatial,
+            global_features=self.global_features.to(device, non_blocking=non_blocking),
+            workers=self.workers.to(device, non_blocking=non_blocking),
+            worker_positions=self.worker_positions.to(
+                device, non_blocking=non_blocking
+            ),
         )
 
     def index(self, index: torch.Tensor | slice) -> TorchObservation:

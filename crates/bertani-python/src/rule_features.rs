@@ -5,9 +5,7 @@
 
 #![allow(clippy::all, clippy::pedantic)]
 
-use numpy::{
-    PyArray2, PyArray3, PyArray4, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
-};
+use numpy::{PyArray2, PyArray3, PyArray4, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -49,12 +47,16 @@ pub(crate) fn extract_rule_features<'py>(
     shed_capacity: i64,
 ) -> PyResult<()> {
     if episode_steps <= 0 || turns_per_day <= 0 || starting_money <= 0 || shed_capacity <= 0 {
-        return Err(PyValueError::new_err("rule feature configuration must be positive"));
+        return Err(PyValueError::new_err(
+            "rule feature configuration must be positive",
+        ));
     }
 
     let global_shape = global_features.shape();
     if global_shape.len() != 3 || global_shape[2] < 30 {
-        return Err(PyValueError::new_err("global_features has incompatible shape"));
+        return Err(PyValueError::new_err(
+            "global_features has incompatible shape",
+        ));
     }
     let num_envs = global_shape[0];
     let players = global_shape[1];
@@ -96,7 +98,9 @@ pub(crate) fn extract_rule_features<'py>(
         || out_hour.shape() != seat_shape
         || out_money.shape() != seat_shape
     {
-        return Err(PyValueError::new_err("scalar rule feature outputs have incompatible shape"));
+        return Err(PyValueError::new_err(
+            "scalar rule feature outputs have incompatible shape",
+        ));
     }
     if out_crop_counts.shape() != [num_envs, players, CROP_COUNT]
         || out_animal_counts.shape() != [num_envs, players, ANIMAL_COUNT]
@@ -106,7 +110,9 @@ pub(crate) fn extract_rule_features<'py>(
         || out_opponent_crop_counts.shape() != [num_envs, players, CROP_COUNT]
         || out_market_price_ratios.shape() != [num_envs, players, 9]
     {
-        return Err(PyValueError::new_err("vector rule feature outputs have incompatible shape"));
+        return Err(PyValueError::new_err(
+            "vector rule feature outputs have incompatible shape",
+        ));
     }
 
     let global_guard = global_features.readonly();
@@ -150,8 +156,7 @@ pub(crate) fn extract_rule_features<'py>(
             step_out[seat] = step;
             day_out[seat] = step / turns_per_day;
             hour_out[seat] = step % turns_per_day;
-            money_out[seat] = f64::from(farms[[environment, player, 0, 0]])
-                * starting_money as f64;
+            money_out[seat] = f64::from(farms[[environment, player, 0, 0]]) * starting_money as f64;
 
             for crop in 0..CROP_COUNT {
                 let channel = TILE_CROP_START + crop;
@@ -164,8 +169,7 @@ pub(crate) fn extract_rule_features<'py>(
                     }
                 }
                 crop_out[seat * CROP_COUNT + crop] = own_sum.round_ties_even() as i64;
-                opponent_crop_out[seat * CROP_COUNT + crop] =
-                    opponent_sum.round_ties_even() as i64;
+                opponent_crop_out[seat * CROP_COUNT + crop] = opponent_sum.round_ties_even() as i64;
             }
 
             for animal in 0..ANIMAL_COUNT {
@@ -180,10 +184,8 @@ pub(crate) fn extract_rule_features<'py>(
             }
 
             for item in 0..ITEM_COUNT {
-                shed_out[seat * ITEM_COUNT + item] = rounded_i64(
-                    private[[environment, player, item]],
-                    shed_capacity as f32,
-                );
+                shed_out[seat * ITEM_COUNT + item] =
+                    rounded_i64(private[[environment, player, item]], shed_capacity as f32);
             }
             for seed in 0..SEED_COUNT {
                 seeds_out[seat * SEED_COUNT + seed] =

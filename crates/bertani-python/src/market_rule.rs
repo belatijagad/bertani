@@ -17,8 +17,7 @@
 )]
 
 use numpy::{
-    PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods,
-    PyUntypedArrayMethods,
+    PyArray2, PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -63,19 +62,18 @@ const SHOP_DEMAND: [[i64; PRODUCT_COUNT]; 8] = [
     [0, 0, 0, 0, 0, 0, 0, 2, 0], // yarn store
 ];
 
-const MARKET_BASE_PRICES: [f64; PRODUCT_COUNT] = [
-    25.0, 35.0, 60.0, 120.0, 250.0, 50.0, 160.0, 200.0, 100.0,
-];
+const MARKET_BASE_PRICES: [f64; PRODUCT_COUNT] =
+    [25.0, 35.0, 60.0, 120.0, 250.0, 50.0, 160.0, 200.0, 100.0];
 
 const SALE_BATCHES: [i64; PRODUCT_COUNT] = [
-    7, // wheat
-    4, // carrot
-    0, // tomato: accidental inventory uses full shed count
-    8, // strawberry
+    7,  // wheat
+    4,  // carrot
+    0,  // tomato: accidental inventory uses full shed count
+    8,  // strawberry
     12, // melon
-    0, // egg: accidental inventory uses full shed count
-    6, // milk
-    4, // wool
+    0,  // egg: accidental inventory uses full shed count
+    6,  // milk
+    4,  // wool
     18, // fertilizer
 ];
 
@@ -153,12 +151,16 @@ pub(crate) fn propose_rule_market<'py>(
     turns_per_day: i64,
 ) -> PyResult<()> {
     if starting_money <= 0 || shed_capacity <= 0 || episode_steps <= 0 || turns_per_day <= 0 {
-        return Err(PyValueError::new_err("market configuration must be positive"));
+        return Err(PyValueError::new_err(
+            "market configuration must be positive",
+        ));
     }
 
     let global_shape = global_features.shape();
     if global_shape.len() != 3 || global_shape[2] < 30 {
-        return Err(PyValueError::new_err("global_features has incompatible shape"));
+        return Err(PyValueError::new_err(
+            "global_features has incompatible shape",
+        ));
     }
     let num_envs = global_shape[0];
     let players = global_shape[1];
@@ -196,7 +198,9 @@ pub(crate) fn propose_rule_market<'py>(
     }
     let max_units = unit_shape[3];
     if active_units.shape() != [num_envs, players, max_units] {
-        return Err(PyValueError::new_err("active_units shape does not match units"));
+        return Err(PyValueError::new_err(
+            "active_units shape does not match units",
+        ));
     }
     if seat_mask.shape() != [num_envs, players] {
         return Err(PyValueError::new_err("seat_mask must have shape [N, P]"));
@@ -232,7 +236,9 @@ pub(crate) fn propose_rule_market<'py>(
         || action_shape[1] != players
         || action_shape[3] != 3
     {
-        return Err(PyValueError::new_err("market_actions has incompatible shape"));
+        return Err(PyValueError::new_err(
+            "market_actions has incompatible shape",
+        ));
     }
     let max_orders = action_shape[2];
 
@@ -242,7 +248,9 @@ pub(crate) fn propose_rule_market<'py>(
         ("market_overflow", market_overflow.is_c_contiguous()),
     ] {
         if !contiguous {
-            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+            return Err(PyValueError::new_err(format!(
+                "{name} must be C-contiguous"
+            )));
         }
     }
 
@@ -350,7 +358,15 @@ pub(crate) fn propose_rule_market<'py>(
                     if tiles[[environment, player, 0, y, x, TILE_CROP_START + ITEM_TOMATO]] > 0.5 {
                         ongoing_count += 1;
                     }
-                    if tiles[[environment, player, 0, y, x, TILE_CROP_START + ITEM_STRAWBERRY]] > 0.5 {
+                    if tiles[[
+                        environment,
+                        player,
+                        0,
+                        y,
+                        x,
+                        TILE_CROP_START + ITEM_STRAWBERRY,
+                    ]] > 0.5
+                    {
                         ongoing_count += 1;
                     }
                 }
@@ -366,15 +382,33 @@ pub(crate) fn propose_rule_market<'py>(
                 }
                 active_count += 1;
                 carried_wheat += rounded_i64(
-                    units[[environment, player, 0, worker, UNIT_INVENTORY_START + ITEM_WHEAT]],
+                    units[[
+                        environment,
+                        player,
+                        0,
+                        worker,
+                        UNIT_INVENTORY_START + ITEM_WHEAT,
+                    ]],
                     shed_scale,
                 );
                 carried_cows += rounded_i64(
-                    units[[environment, player, 0, worker, UNIT_INVENTORY_START + ITEM_COW]],
+                    units[[
+                        environment,
+                        player,
+                        0,
+                        worker,
+                        UNIT_INVENTORY_START + ITEM_COW,
+                    ]],
                     shed_scale,
                 );
                 carried_sheep += rounded_i64(
-                    units[[environment, player, 0, worker, UNIT_INVENTORY_START + ITEM_SHEEP]],
+                    units[[
+                        environment,
+                        player,
+                        0,
+                        worker,
+                        UNIT_INVENTORY_START + ITEM_SHEEP,
+                    ]],
                     shed_scale,
                 );
             }
@@ -427,7 +461,8 @@ pub(crate) fn propose_rule_market<'py>(
             };
             let land_finance_melon = shed[ITEM_MELON].min(melon_needed);
             let estimated_after_melon = money + (land_finance_melon * melon_price) as f64;
-            let remaining_shortfall = ((next_land_cost as f64 - estimated_after_melon).max(0.0)) as i64;
+            let remaining_shortfall =
+                ((next_land_cost as f64 - estimated_after_melon).max(0.0)) as i64;
             let wool_price = current_prices[ITEM_WOOL];
             let wool_needed = if wool_price > 0 {
                 (remaining_shortfall + wool_price - 1) / wool_price
@@ -438,10 +473,22 @@ pub(crate) fn propose_rule_market<'py>(
 
             let financing = target_land_day && land_shortfall > 0;
             if financing && land_finance_melon > 0 {
-                out.append(environment, player, MARKET_SELL, ITEM_MELON, land_finance_melon);
+                out.append(
+                    environment,
+                    player,
+                    MARKET_SELL,
+                    ITEM_MELON,
+                    land_finance_melon,
+                );
             }
             if financing && land_finance_wool > 0 {
-                out.append(environment, player, MARKET_SELL, ITEM_WOOL, land_finance_wool);
+                out.append(
+                    environment,
+                    player,
+                    MARKET_SELL,
+                    ITEM_WOOL,
+                    land_finance_wool,
+                );
             }
 
             let estimated_land_cash = money
@@ -450,13 +497,16 @@ pub(crate) fn propose_rule_market<'py>(
                 } else {
                     0.0
                 };
-            let scheduled_first_expansion = target_land_day && unlocked == 1 && estimated_land_cash >= 1_000.0;
-            let scheduled_third_expansion = target_land_day && unlocked == 2 && estimated_land_cash >= 2_000.0;
+            let scheduled_first_expansion =
+                target_land_day && unlocked == 1 && estimated_land_cash >= 1_000.0;
+            let scheduled_third_expansion =
+                target_land_day && unlocked == 2 && estimated_land_cash >= 2_000.0;
             let yarn_expansion_early = day >= 12
                 && unlocked == 3
                 && target_animal_counts[[environment, player, 2]] >= 12
                 && money >= 4_000.0;
-            let early_land_buy = scheduled_first_expansion || scheduled_third_expansion || yarn_expansion_early;
+            let early_land_buy =
+                scheduled_first_expansion || scheduled_third_expansion || yarn_expansion_early;
             if early_land_buy {
                 out.append(environment, player, MARKET_BUY_LAND, 0, 0);
             }
@@ -475,13 +525,19 @@ pub(crate) fn propose_rule_market<'py>(
                 );
             }
 
-            for &item in &[ITEM_MILK, ITEM_WOOL, ITEM_MELON, ITEM_STRAWBERRY, ITEM_CARROT] {
+            for &item in &[
+                ITEM_MILK,
+                ITEM_WOOL,
+                ITEM_MELON,
+                ITEM_STRAWBERRY,
+                ITEM_CARROT,
+            ] {
                 let mut shop_demand = 0_i64;
                 for shop in 0..8 {
                     shop_demand += shops[shop] * SHOP_DEMAND[shop][item];
                 }
-                let demand_now = i64::from(town_center_tick)
-                    + if town_tick { shop_demand } else { 0 };
+                let demand_now =
+                    i64::from(town_center_tick) + if town_tick { shop_demand } else { 0 };
                 let sale_window = post_town_demand || (town_tick && demand_now == 0);
                 let normal_count = shed[item].min(SALE_BATCHES[item]);
                 let count = if item == ITEM_WOOL && expansion_financing {
@@ -505,9 +561,7 @@ pub(crate) fn propose_rule_market<'py>(
 
             let wheat_surplus = (shed[ITEM_WHEAT] - wheat_reserve[[environment, player]]).max(0);
             let wheat_count = wheat_surplus.min(SALE_BATCHES[ITEM_WHEAT]);
-            if wheat_count > 0
-                && ((ratios[ITEM_WHEAT] >= 1.0 && post_town_demand) || pressure)
-            {
+            if wheat_count > 0 && ((ratios[ITEM_WHEAT] >= 1.0 && post_town_demand) || pressure) {
                 out.append(environment, player, MARKET_SELL, ITEM_WHEAT, wheat_count);
             }
 
@@ -527,7 +581,8 @@ pub(crate) fn propose_rule_market<'py>(
             let owned_cows = animal_counts[1] + shed[ITEM_COW] + carried_cows;
             let owned_sheep = animal_counts[2] + shed[ITEM_SHEEP] + carried_sheep;
             let missing_cows = (target_animal_counts[[environment, player, 1]] - owned_cows).max(0);
-            let missing_sheep = (target_animal_counts[[environment, player, 2]] - owned_sheep).max(0);
+            let missing_sheep =
+                (target_animal_counts[[environment, player, 2]] - owned_sheep).max(0);
             let expansion_ready = ((day < 6) || unlocked >= 2 || land_buy) && !reserve_for_land;
             let land_cost = match unlocked.min(3) {
                 0 => 0_i64,
@@ -547,13 +602,19 @@ pub(crate) fn propose_rule_market<'py>(
                 - animal_cash_reserve as f64
                 - scheduled_land_reserve as f64
                 - if land_buy { land_cost as f64 } else { 0.0 })
-                .max(0.0) as i64;
+            .max(0.0) as i64;
             let buy_sheep = missing_sheep.min(budget / 500);
             budget -= buy_sheep * 500;
             let buy_cows = missing_cows.min(budget / 400);
             let establishing_second_field = day >= 7 && day <= 9;
             if expansion_ready && !establishing_second_field && buy_sheep > 0 {
-                out.append(environment, player, MARKET_BUY_ANIMAL, ITEM_SHEEP, buy_sheep);
+                out.append(
+                    environment,
+                    player,
+                    MARKET_BUY_ANIMAL,
+                    ITEM_SHEEP,
+                    buy_sheep,
+                );
             }
             if expansion_ready && !establishing_second_field && buy_cows > 0 {
                 out.append(environment, player, MARKET_BUY_ANIMAL, ITEM_COW, buy_cows);
@@ -579,24 +640,21 @@ pub(crate) fn propose_rule_market<'py>(
                 total_crops += crops[crop];
                 total_seeds += seeds[crop];
             }
-            let total_missing = (total_target + total_replacement - total_crops - total_seeds).max(0);
-            let wheat_missing = (
-                target_crop_counts[[environment, player, ITEM_WHEAT]]
-                    + replacement_seeds[ITEM_WHEAT]
-                    - crops[ITEM_WHEAT]
-                    - seeds[ITEM_WHEAT]
-            )
-            .max(0);
+            let total_missing =
+                (total_target + total_replacement - total_crops - total_seeds).max(0);
+            let wheat_missing = (target_crop_counts[[environment, player, ITEM_WHEAT]]
+                + replacement_seeds[ITEM_WHEAT]
+                - crops[ITEM_WHEAT]
+                - seeds[ITEM_WHEAT])
+                .max(0);
             let mut cash_seed_missing = (total_missing - wheat_missing).max(0);
 
             for crop in 0..CROP_COUNT {
                 let missing = if crop == ITEM_WHEAT {
                     wheat_missing
                 } else {
-                    let preferred_deficit = (
-                        target_crop_counts[[environment, player, crop]] - crops[crop]
-                    )
-                    .max(0);
+                    let preferred_deficit =
+                        (target_crop_counts[[environment, player, crop]] - crops[crop]).max(0);
                     let value = cash_seed_missing.min(preferred_deficit);
                     cash_seed_missing -= value;
                     value
@@ -625,7 +683,13 @@ pub(crate) fn propose_rule_market<'py>(
             }
 
             if expansion_ready && establishing_second_field && buy_sheep > 0 {
-                out.append(environment, player, MARKET_BUY_ANIMAL, ITEM_SHEEP, buy_sheep);
+                out.append(
+                    environment,
+                    player,
+                    MARKET_BUY_ANIMAL,
+                    ITEM_SHEEP,
+                    buy_sheep,
+                );
             }
             if expansion_ready && establishing_second_field && buy_cows > 0 {
                 out.append(environment, player, MARKET_BUY_ANIMAL, ITEM_COW, buy_cows);

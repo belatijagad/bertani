@@ -7,9 +7,7 @@
 
 #![allow(clippy::all, clippy::pedantic)]
 
-use numpy::{
-    PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods,
-};
+use numpy::{PyArray3, PyArray4, PyArray5, PyArray6, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -49,7 +47,9 @@ impl NativeWorkforcePlanner {
     #[new]
     fn new(shed_capacity: i64, turns_per_day: i64, episode_steps: i64) -> PyResult<Self> {
         if shed_capacity <= 0 || turns_per_day <= 0 || episode_steps <= 0 {
-            return Err(PyValueError::new_err("workforce configuration must be positive"));
+            return Err(PyValueError::new_err(
+                "workforce configuration must be positive",
+            ));
         }
         Ok(Self {
             shed_capacity,
@@ -84,7 +84,9 @@ impl NativeWorkforcePlanner {
         }
         let active_shape = active_units.shape();
         if active_shape.len() != 3 {
-            return Err(PyValueError::new_err("active_units must have shape [N, P, U]"));
+            return Err(PyValueError::new_err(
+                "active_units must have shape [N, P, U]",
+            ));
         }
         let num_envs = active_shape[0];
         let players = active_shape[1];
@@ -101,7 +103,9 @@ impl NativeWorkforcePlanner {
             || global_features.shape()[0] != num_envs
             || global_features.shape()[1] != players
         {
-            return Err(PyValueError::new_err("global_features batch shape mismatch"));
+            return Err(PyValueError::new_err(
+                "global_features batch shape mismatch",
+            ));
         }
         let farm_shape = farms.shape();
         if farm_shape.len() != 4
@@ -219,14 +223,8 @@ impl NativeWorkforcePlanner {
                     let mut animal_sum = 0.0_f32;
                     for y in 0..board_size {
                         for x in 0..board_size {
-                            animal_sum += tiles[[
-                                environment,
-                                player,
-                                0,
-                                y,
-                                x,
-                                TILE_ANIMAL_START + animal,
-                            ]];
+                            animal_sum +=
+                                tiles[[environment, player, 0, y, x, TILE_ANIMAL_START + animal]];
                         }
                     }
                     animal_total += animal_sum.round_ties_even() as i16;
@@ -282,9 +280,8 @@ impl NativeWorkforcePlanner {
 
                 let mut total_demand = 0.0_f32;
                 for quadrant in 0..QUADRANTS {
-                    let unlocked = farms[[environment, player, 0, 4 + quadrant]]
-                        .round_ties_even()
-                        != 0.0;
+                    let unlocked =
+                        farms[[environment, player, 0, 4 + quadrant]].round_ties_even() != 0.0;
                     if !unlocked {
                         demand[seat][quadrant] = 0.0;
                     }
@@ -293,9 +290,7 @@ impl NativeWorkforcePlanner {
                 for quadrant in 0..QUADRANTS {
                     effective_demand[seat][quadrant] = if total_demand > 0.0 {
                         demand[seat][quadrant]
-                    } else if farms[[environment, player, 0, 4 + quadrant]]
-                        .round_ties_even()
-                        != 0.0
+                    } else if farms[[environment, player, 0, 4 + quadrant]].round_ties_even() != 0.0
                     {
                         1.0
                     } else {
@@ -351,8 +346,8 @@ impl NativeWorkforcePlanner {
                         continue;
                     }
                     let mut best_quadrant = 0usize;
-                    let mut best_pressure = effective_demand[seat][0]
-                        / (assigned_count[seat][0] + 1.0);
+                    let mut best_pressure =
+                        effective_demand[seat][0] / (assigned_count[seat][0] + 1.0);
                     for quadrant in 1..QUADRANTS {
                         let pressure = effective_demand[seat][quadrant]
                             / (assigned_count[seat][quadrant] + 1.0);
@@ -384,13 +379,9 @@ impl NativeWorkforcePlanner {
                     let mut inventory_total = 0_i64;
                     let mut animal_inventory_total = 0_i64;
                     for item in 0..ITEM_COUNT {
-                        let count = (units[[
-                            environment,
-                            player,
-                            0,
-                            worker,
-                            UNIT_INVENTORY_START + item,
-                        ]] * self.shed_capacity as f32)
+                        let count = (units
+                            [[environment, player, 0, worker, UNIT_INVENTORY_START + item]]
+                            * self.shed_capacity as f32)
                             .round_ties_even() as i64;
                         inventory_total += count;
                         if (ITEM_COW..=ITEM_SHEEP).contains(&item) {

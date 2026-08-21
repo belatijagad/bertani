@@ -109,7 +109,8 @@ def test_workforce_market_replaces_base_hires_and_retains_economy() -> None:
     batch = environment.reset(np.asarray([9, 10], dtype=np.uint64))
     seats = np.asarray([0, 1], dtype=np.int64)
     market_policy = WorkforceMarketPolicy(
-        _BaseMarket(), max_hires_per_turn=2  # type: ignore[arg-type]
+        _BaseMarket(),
+        max_hires_per_turn=2,  # type: ignore[arg-type]
     )
 
     actions, lengths = market_policy.actions(
@@ -139,12 +140,11 @@ def test_collect_and_update_ppo_smoke() -> None:
         weed_spawn_chance=0.0,
     )
     self_play = V9SelfPlayEnv(
-        environment, _PassOpponent(environment)  # type: ignore[arg-type]
+        environment,
+        _PassOpponent(environment),  # type: ignore[arg-type]
     )
     batch = self_play.reset(np.asarray([21, 22], dtype=np.uint64))
-    model = build_actor_critic(
-        ActorCriticConfig(d_model=16, n_blocks=1, max_hands=3)
-    )
+    model = build_actor_critic(ActorCriticConfig(d_model=16, n_blocks=1, max_hands=3))
     config = PPOConfig(
         steps_per_update=2,
         epochs_per_update=2,
@@ -176,9 +176,7 @@ def test_collect_and_update_ppo_smoke() -> None:
     assert collection.profile.synchronized
     assert collection.episodes.completed == 2
     assert (
-        collection.episodes.wins
-        + collection.episodes.ties
-        + collection.episodes.losses
+        collection.episodes.wins + collection.episodes.ties + collection.episodes.losses
         == 2
     )
     assert trainer.updates == 1
@@ -189,3 +187,53 @@ def test_collect_and_update_ppo_smoke() -> None:
     assert stats.backward_seconds > 0.0
     assert stats.optimizer_seconds > 0.0
     assert stats.profile_synchronized == 1.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_update_uses_gpu_optimized_layout_and_rollout_preload() -> None:
+    torch.manual_seed(13)
+    environment = VecEnv(
+        2,
+        auto_reset=True,
+        episode_steps=3,
+        turns_per_day=3,
+        weed_spawn_chance=0.0,
+    )
+    self_play = V9SelfPlayEnv(
+        environment,
+        _PassOpponent(environment),  # type: ignore[arg-type]
+    )
+    batch = self_play.reset(np.asarray([31, 32], dtype=np.uint64))
+    model = build_actor_critic(ActorCriticConfig(d_model=16, n_blocks=1, max_hands=3))
+    config = PPOConfig(
+        steps_per_update=2,
+        epochs_per_update=2,
+        minibatch_size=2,
+        compile_model=False,
+        mixed_precision=True,
+        profile=True,
+    )
+    reward = CompetitiveReward()
+    reward.reset(self_play, batch)
+    trainer = PPOTrainer(model, config, device="cuda")
+    collection = collect_rollout(
+        self_play,
+        model,
+        WorkforceMarketPolicy(max_hires_per_turn=1),
+        reward,
+        config,
+        device=torch.device("cuda"),
+    )
+
+    stats = trainer.update(collection.rollout)
+
+    convolution = model.encoder.spatial_input[0]
+    assert convolution.weight.is_contiguous(memory_format=torch.channels_last)
+    assert trainer.scaler.is_enabled()
+    assert stats.device_transfer_seconds > 0.0
+    assert stats.peak_gpu_memory_mb > 0.0
+
+
+def test_ppo_config_rejects_unknown_compile_mode() -> None:
+    with pytest.raises(ValueError, match="compile_mode must be one of"):
+        PPOConfig(compile_mode="fastest-please")
