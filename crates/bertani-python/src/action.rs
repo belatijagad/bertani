@@ -219,12 +219,26 @@ fn decode_player(
 
     let market_base = player * max_orders * ACTION_FIELD_COUNT;
     let mut market = Vec::with_capacity(market_len);
+    let mut remaining_hires = max_units.saturating_sub(1).saturating_sub(hand_count);
     for slot in 0..market_len {
-        market.push(decode_market(
+        let order = decode_market(
             row(market_rows, market_base + slot * ACTION_FIELD_COUNT),
             player,
             slot,
-        )?);
+        )?;
+        if order == MarketOrder::Hire {
+            if remaining_hires == 0 {
+                // Preserve market-slot alignment while preventing the fixed
+                // worker tensor from overflowing on the next observation.
+                market.push(MarketOrder::Sell {
+                    item: Item::Wheat,
+                    count: 0,
+                });
+                continue;
+            }
+            remaining_hires -= 1;
+        }
+        market.push(order);
     }
 
     Ok(Action {
@@ -601,7 +615,7 @@ mod tests {
     #[test]
     fn decodes_every_market_operation_without_collapsing_none_gap() {
         let max_orders = MARKET_ACTION_COUNT;
-        let (units, mut market) = zero_actions(1, max_orders);
+        let (units, mut market) = zero_actions(2, max_orders);
         let rows = [
             [MARKET_NONE, 0, 123],
             [MARKET_HIRE, 0, -1],
@@ -616,7 +630,7 @@ mod tests {
         }
 
         let decoded =
-            decode_actions(&units, &market, 1, max_orders, [0, 0], [max_orders, 0]).unwrap();
+            decode_actions(&units, &market, 2, max_orders, [0, 0], [max_orders, 0]).unwrap();
         assert_eq!(
             decoded[0].market,
             vec![

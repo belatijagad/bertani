@@ -1,5 +1,5 @@
-# Focused 14-day experiment: neural worker actions and workforce target with
-# the established rule-based economy handling purchases and sales.
+# Focused 14-day experiment: the original learning representation and joint
+# PPO, plus the 17-slot capacity optimization and rule-based economy.
 
 max_updates: 300
 optimizer_kwargs: {lr: 1e-4, eps: 0.000_3}
@@ -49,10 +49,10 @@ rl_model_config:
   workforce_prior_std: 2.0
 
 device: cuda
-checkpoint_path: outputs/ppo-14d/latest.pt
+checkpoint_path: outputs/ppo-14d-fast-original/latest.pt
 resume: null
 checkpoint_every: 25
-metrics_file: outputs/ppo-14d/metrics.jsonl
+metrics_file: outputs/ppo-14d-fast-original/metrics.jsonl
 progress: true
 profile: false
 cprofile: null

@@ -14,7 +14,7 @@ def _maintenance_tasks_for_tile(tile: np.ndarray) -> TaskBatch:
     batch = env.reset()
     target = batch.observation_views.tiles[0, 0, 0, 0, 0]
     target.fill(0.0)
-    target[:] = tile
+    target[: tile.size] = tile
     tasks = TaskBatch.allocate(1, 2, env.board_size)
     propose_native_maintenance_tasks(
         batch,

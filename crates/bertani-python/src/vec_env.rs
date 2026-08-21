@@ -83,11 +83,6 @@ impl VecEnvCore {
         } else {
             max_units
         };
-        if max_units < exact_unit_bound {
-            return Err(format!(
-                "max_units={max_units} is too small; this configuration can require {exact_unit_bound} slots"
-            ));
-        }
         validate_tensor_dimensions(base_config.board_size, max_units)?;
 
         let observation_spec = ObservationSpec::new(base_config.board_size, max_units);

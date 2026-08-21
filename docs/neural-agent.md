@@ -5,7 +5,7 @@ shared-map/shared-entity design used by Frog Parade's Lux AI Season 3 agent.
 It is intentionally a model boundary rather than a training framework.
 
 ```text
-both farms' tile channels [48, B, B] -> spatial projection --+
+both farms' tile channels [48, B, B] -> spatial projection --------+
                                                                +-> residual CNN
 global/farm/private channels [77]       -> global projection ---+        |
                                                                         +-> value
@@ -19,12 +19,18 @@ acting workers [U, 29] ---------------------------------------------------------
 
 The model has one parameter-shared worker head. `U` is only a padded tensor
 dimension; inactive slots are suppressed by `active_workers`. The same model
-therefore accepts the three-unit buffers of a small test environment, the 13
-active units seen in the downloaded leader replays, and the official default
-231-slot environment buffer.
+therefore accepts different worker dimensions. PPO training deliberately uses
+17 slots: one farmer plus the policy's maximum of 16 hands. The generic vector
+environment can still allocate the official theoretical bound when no explicit
+capacity is supplied.
 
 The default encoder uses a conventional 64-channel width and five residual
-blocks. Together with all actor and critic heads, it has 475,580 trainable
+blocks. The spatial input is the original 24 tile-state channels for each farm.
+Entity identity, position, visibility, inventory, and inventory order remain in
+the 29-channel worker rows consumed by the shared actor head. This restores the
+representation used by the strongest original learning run while retaining the
+smaller training capacity. Together with all actor and critic heads, the model
+has 476,348 trainable
 parameters. The worker dimension changes activation memory and compute but not
 the parameter count.
 
@@ -39,6 +45,12 @@ the existing deterministic scheduler later.
 The workforce head predicts a target number of hired hands from zero through
 `max_hands`. It does not emit `HIRE` market orders. Market order construction
 is a separate global decision problem and should be added as its own decoder.
+
+PPO sums active-worker and workforce log-probabilities into one joint team
+log-probability before forming the clipped ratio. This matches the successful
+Lux formulation for a player-level reward. Kaggriculture is fully observed and
+its rules are fixed, so the encoder deliberately does not use Lux's temporal
+frame stack.
 
 Install the optional Torch dependency and run a forward pass:
 

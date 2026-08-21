@@ -30,10 +30,29 @@ def test_default_max_units_is_the_exact_reachable_bound() -> None:
     # another observation, leaving 23 observable hire rounds plus the farmer.
     assert env.max_units == (24 - 1) * 10 + 1 == 231
 
-    with pytest.raises(ValueError, match=r"max_units=230 is too small.*231 slots"):
-        VecEnv(1, max_units=230)
+    assert VecEnv(1, max_units=17).max_units == 17
 
     assert VecEnv(1, turns_per_day=1).max_units == 1
+
+
+def test_explicit_unit_capacity_suppresses_excess_hires() -> None:
+    env = VecEnv(
+        1,
+        max_units=2,
+        episode_steps=4,
+        turns_per_day=4,
+        starting_money=10_000,
+        weed_spawn_chance=0.0,
+    )
+    batch = env.reset()
+    units, market, lengths = env.clear_actions()
+    market[0, 0, :3, 0] = int(MarketOp.HIRE)
+    lengths[0, 0] = 3
+
+    batch = env.step(units, market, lengths)
+
+    assert batch.active_units[0, 0].sum() == 2
+    assert not batch.mask_views.market_ops[0, 0, int(MarketOp.HIRE)]
 
 
 def test_native_decode_errors_are_transactional_for_the_whole_batch() -> None:

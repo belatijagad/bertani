@@ -268,6 +268,7 @@ def run(args: argparse.Namespace) -> None:
     environment = VecEnv(
         args.num_envs,
         seed=args.seed,
+        max_units=model_config.max_hands + 1,
         auto_reset=True,
         episode_steps=args.episode_steps,
         turns_per_day=args.turns_per_day,

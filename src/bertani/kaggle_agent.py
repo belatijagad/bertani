@@ -250,9 +250,8 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
     for unit, inventory in enumerate(inventories[:max_units]):
         units[0, seat, 0, unit, 4] = 1.0
         for item, name in enumerate(ITEM_NAMES):
-            units[0, seat, 0, unit, 5 + item] = int(
-                _get(inventory, name, 0)
-            ) / config.shed_capacity
+            count = int(_get(inventory, name, 0))
+            units[0, seat, 0, unit, 5 + item] = count / config.shed_capacity
     active_units[0, seat, :max_units] = True
 
     unit_ops = np.zeros((1, 2, max_units, len(UnitOp)), dtype=np.bool_)

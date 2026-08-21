@@ -48,7 +48,14 @@ transitions = max(1, episode_steps - 1)
 U = 1 + min(turns_per_day - 1, transitions) * max_market_orders
 ```
 
-It is 231 under the official defaults. Hands hired on the end-of-day transition are cleared before the next observation, so they never need action slots. A nonzero `max_units` override smaller than the bound is rejected rather than silently dropping units.
+It is 231 under the official defaults. This is a theoretical safety allocation,
+not a useful workforce scale: it assumes all ten market slots hire on every
+observable turn and ignores affordability. Hands hired on the end-of-day
+transition are cleared before the next observation, so they never need action
+slots. A nonzero `max_units` selects an explicit policy capacity. Once that
+capacity is full, `HIRE` is masked and additional hire orders become aligned
+no-ops, so the fixed observation tensor cannot overflow. PPO uses 17 slots for
+one farmer and at most 16 hands.
 
 ## Observation layout
 
@@ -62,9 +69,10 @@ Observations are player-relative `float32[N, 2, O]`. For each viewer, relative f
 | `units` | `[2, U, 29]` | active/farmer/position/visibility 5, inventory 12, insertion order 12 |
 | `private` | `[17]` | own shed 12 and seeds 5 |
 
-Thus `O = 77 + 48*B*B + 58*U`, or 18,275 with default `B=10` and `U=231`.
+Thus `O = 77 + 48*B*B + 58*U`: 18,275 with the theoretical default
+`B=10, U=231`, or 5,863 for PPO's `U=17`.
 
-Continuous values use stable game-scale normalization. Values are not clipped and can exceed one. Coordinates divide by `B-1`; inventory divides by shed capacity; item insertion-order IDs divide by 11 and unused positions are `-1`. Product-demand channels divide the units consumed at the next shop tick by the maximum possible demand of 16. The final three global channels are normalized turns until the next shop tick, town-center tick, and shop-unlock transition; zero means the event follows the current action. The 24 tile channels distinguish empty, locked, weed, plant, empty coop/pasture, and each occupied animal type, then encode crop and lifecycle state. `buffer_specs` is the authoritative source for offsets and channel counts.
+Continuous values use stable game-scale normalization. Values are not clipped and can exceed one. Coordinates divide by `B-1`; hand counts divide by `U-1`, so PPO uses the meaningful 16-hand policy capacity rather than the theoretical 231-slot allocation. Shed and carried inventory divide by shed capacity. Item insertion-order IDs divide by 11 and unused positions are `-1`. Product-demand channels divide the units consumed at the next shop tick by the maximum possible demand of 16. The final three global channels are normalized turns until the next shop tick, town-center tick, and shop-unlock transition; zero means the event follows the current action. The 24 tile channels distinguish empty, locked, weed, plant, empty coop/pasture, and each occupied animal type, then encode crop and lifecycle state. `buffer_specs` is the authoritative source for offsets and channel counts.
 
 ## Action masks
 
@@ -85,6 +93,6 @@ Masks mean that one unit of an action can affect the pre-step state. They are po
 
 `state_snapshot(i)` and `terminal_snapshot(i)` return complete JSON-compatible debug state. They are intentionally outside the hot path. `NativeVecEnv` also exposes `reset_into` and `step_into` for integrations that manage their own buffers; `buffer_specs()` is the source of truth for their shapes and dtypes. Native boolean outputs use `uint8` storage restricted to zero and one, while the supported Python wrapper exposes zero-copy `np.bool_` views. This avoids constructing Rust `bool` references over arbitrary uninitialized NumPy bytes.
 
-The extension exports `RL_API_VERSION = 1`; the Python wrapper refuses a mismatched native module. Increment this value whenever action IDs or buffer semantics change incompatibly.
+The extension exports `RL_API_VERSION = 5`; the Python wrapper refuses a mismatched native module. Increment this value whenever action IDs or buffer semantics change incompatibly.
 
 The current Python constructor exposes the official scalar configuration and uses the pinned default market curves. Custom sparse `marketParams` remain available in the Rust core but are not yet part of the fixed Python training boundary.

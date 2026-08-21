@@ -291,11 +291,8 @@ def collect_rollout(
         observations.append(observation)
         action_information.append(action_info)
         actions.append(sampled_actions)
-        policy_values = (
-            torch.stack((joint_log_probs, output.value), dim=-1).float().cpu()
-        )
-        old_log_probs.append(policy_values[..., 0])
-        values.append(policy_values[..., 1])
+        old_log_probs.append(joint_log_probs.float().cpu())
+        values.append(output.value.float().cpu())
         started = time.perf_counter()
         rewards.append(reward.transition(self_play, self_play.batch))
         learner_dones = self_play.learner_dones().astype(bool, copy=True)

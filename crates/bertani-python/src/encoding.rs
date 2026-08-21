@@ -322,11 +322,12 @@ fn encode_farm(
     output[offset] = ratio_f64(farm.money, sim.config.starting_money.max(1) as f64);
     output[offset + 1] = coordinate(farm.farmer.x, spec.board_size);
     output[offset + 2] = coordinate(farm.farmer.y, spec.board_size);
-    output[offset + 3] = farm.hands.len() as f32 / spec.max_units.saturating_sub(1).max(1) as f32;
+    let hand_capacity = spec.max_units.saturating_sub(1).max(1);
+    output[offset + 3] = farm.hands.len() as f32 / hand_capacity as f32;
     for (index, quadrant) in Quadrant::ALL.into_iter().enumerate() {
         output[offset + 4 + index] = bool_value(farm.unlocked_quadrants.contains(&quadrant));
     }
-    output[offset + 8] = farm.hires_today as f32 / spec.max_units as f32;
+    output[offset + 8] = farm.hires_today as f32 / hand_capacity as f32;
 
     for (tile_index, tile) in farm.tiles.iter().enumerate() {
         encode_tile(
@@ -671,7 +672,8 @@ fn encode_market_mask(sim: &Sim, viewer: usize, spec: MaskSpec, mask: &mut [u8])
         mask,
         spec,
         MARKET_HIRE,
-        !float_less_than_integer(farm.money, hire_cost),
+        farm.hands.len() < spec.max_units.saturating_sub(1)
+            && !float_less_than_integer(farm.money, hire_cost),
     );
 
     let extra_land = farm.unlocked_quadrants.len().saturating_sub(1);
@@ -868,7 +870,6 @@ mod tests {
         let own_order = own_unit + UNIT_SCALAR_CHANNELS + UNIT_INVENTORY_CHANNELS;
         assert_eq!(obs0[own_order], Item::Milk.index() as f32 / 11.0);
         assert_eq!(obs0[own_order + 1], -1.0);
-
         let (mut obs1, mut mask1, mut active1) = buffers(&sim, max_units);
         encode(&sim, 1, &mut obs1, &mut mask1, &mut active1, &mut overflow).unwrap();
         assert_eq!(obs1[spec.farm_offset(0)], 2.0);

@@ -26,8 +26,9 @@ def test_14_day_ppo_config_loads_the_supported_experiment() -> None:
     assert config.terminal_score is TerminalScore.NET_WORTH
     assert config.max_hires_per_turn == 2
     assert config.resume is None
-    assert config.checkpoint_path == ROOT / "outputs" / "ppo-14d" / "latest.pt"
-    assert config.metrics_file == ROOT / "outputs" / "ppo-14d" / "metrics.jsonl"
+    output = ROOT / "outputs" / "ppo-14d-fast-original"
+    assert config.checkpoint_path == output / "latest.pt"
+    assert config.metrics_file == output / "metrics.jsonl"
     assert config.ppo.learning_rate == 1e-4
     assert config.ppo.adam_epsilon == 3e-4
     assert config.ppo.max_gradient_norm == 10.0

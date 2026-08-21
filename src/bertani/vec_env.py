@@ -30,7 +30,7 @@ except ModuleNotFoundError as error:
     # Kaggle archive remain portable without bundling a platform-specific .so.
     ITEM_COUNT = 12
     MARKET_ACTION_COUNT = 7
-    RL_API_VERSION = 3
+    RL_API_VERSION = 5
     UNIT_ACTION_COUNT = 18
     NativeVecEnv = None  # type: ignore[assignment,misc]
 
@@ -87,9 +87,9 @@ class Item(IntEnum):
     SHEEP = 11
 
 
-if RL_API_VERSION != 3:
+if RL_API_VERSION != 5:
     raise RuntimeError(
-        f"unsupported native RL API version {RL_API_VERSION}; expected version 3"
+        f"unsupported native RL API version {RL_API_VERSION}; expected version 5"
     )
 if len(UnitOp) != UNIT_ACTION_COUNT:
     raise RuntimeError("Python UnitOp IDs do not match the native extension")

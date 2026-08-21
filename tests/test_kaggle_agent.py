@@ -65,3 +65,34 @@ def test_submission_encoder_matches_derived_town_feature_contract() -> None:
         features[30:39], np.asarray([5, 3, 2, 4, 0, 2, 3, 2, 0]) / 16
     )
     np.testing.assert_allclose(features[39:42], [0.25, 1 / 24, 0.0])
+
+
+def test_submission_encoder_maps_workers_without_leaking_opponent_inventory() -> None:
+    own_farm = {
+        "money": 3_000,
+        "farmer": [0, 0],
+        "hands": [[0, 0]],
+        "tiles": [[None]],
+        "unlocked_quadrants": ["NW"],
+        "hires_today": 1,
+    }
+    opponent_farm = {**own_farm, "money": 2_000}
+    observation = {
+        "player": 0,
+        "step": 3,
+        "day": 0,
+        "farms": [own_farm, opponent_farm],
+        "private": {
+            "inventories": [{"WHEAT": 2}, {"WHEAT": 3}],
+        },
+        "market": {},
+        "town": {},
+    }
+
+    batch = observation_batch(observation, RuleConfig())
+    tiles = batch.observation_views.tiles[0, 0, :, 0, 0]
+    units = batch.observation_views.units[0, 0]
+
+    assert tiles.shape == (2, 24)
+    np.testing.assert_allclose(units[0, :2, 5], [0.02, 0.03])
+    assert not units[1, :, 4:].any()

@@ -48,11 +48,15 @@ class ActorCriticOutput(NamedTuple):
 
         result = self.worker_log_probs(active_workers).sum(dim=-1)
         if include_workforce:
-            workforce = self.workforce_log_probs.gather(
-                -1, self.target_hands.unsqueeze(-1)
-            ).squeeze(-1)
-            result = result + workforce
+            result = result + self.workforce_log_prob()
         return result
+
+    def workforce_log_prob(self) -> torch.Tensor:
+        """Return the selected global workforce log-probability."""
+
+        return self.workforce_log_probs.gather(
+            -1, self.target_hands.unsqueeze(-1)
+        ).squeeze(-1)
 
     def to_unit_actions(self) -> torch.Tensor:
         """Convert sampled worker decisions to ``(op, argument, count)`` rows."""
