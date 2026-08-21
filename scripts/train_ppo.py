@@ -24,6 +24,7 @@ from bertani.ppo import (
     PPOConfig,
     PPOTrainer,
     RewardMode,
+    TerminalScore,
     WorkforceMarketPolicy,
     collect_rollout,
     load_experiment_config,
@@ -32,7 +33,7 @@ from bertani.rule_based import RuleConfig
 from bertani_rules.agent import OPENING_BOOK, build_policy
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_FILE = Path(__file__).parent / "config" / "ppo_default.yaml"
+DEFAULT_CONFIG_FILE = Path(__file__).parent / "config" / "ppo_14d.yaml"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=config_args.config)
     parser.add_argument("--updates", type=int, default=experiment.max_updates)
     parser.add_argument("--num-envs", type=int, default=experiment.n_envs)
+    parser.add_argument(
+        "--episode-steps", type=int, default=experiment.episode_steps
+    )
+    parser.add_argument(
+        "--turns-per-day", type=int, default=experiment.turns_per_day
+    )
     parser.add_argument(
         "--steps-per-update", type=int, default=experiment.ppo.steps_per_update
     )
@@ -90,16 +97,11 @@ def parse_args() -> argparse.Namespace:
         help="Coin scale used by net-worth reward shaping.",
     )
     parser.add_argument(
-        "--market",
-        choices=("rule-scaffold", "workforce-only"),
-        default=experiment.market,
-        help="Use rule buying/selling around learned hires, or train hires alone.",
-    )
-    parser.add_argument(
-        "--opening",
-        choices=("none", "rule"),
-        default=experiment.opening,
-        help="Warm-start each learner episode with the scripted rule opening.",
+        "--terminal-score",
+        type=TerminalScore,
+        choices=list(TerminalScore),
+        default=experiment.terminal_score,
+        help="Score completed episodes by bank balance or economic net worth.",
     )
     parser.add_argument(
         "--max-hires-per-turn",
@@ -211,14 +213,18 @@ def effective_experiment_config(
         },
         "normalize_advantages": ppo_config.normalize_advantages,
         "include_workforce": ppo_config.include_workforce,
-        "env_config": {"n_envs": args.num_envs, "seed": args.seed},
+        "env_config": {
+            "n_envs": args.num_envs,
+            "seed": args.seed,
+            "episode_steps": args.episode_steps,
+            "turns_per_day": args.turns_per_day,
+        },
         "self_play_config": {
             "opponent": args.opponent,
             "opponent_path": str(args.opponent_path),
             "reward": args.reward.value,
             "reward_scale": args.reward_scale,
-            "opening": args.opening,
-            "market": args.market,
+            "terminal_score": args.terminal_score.value,
             "max_hires_per_turn": args.max_hires_per_turn,
         },
         "rl_model_config": asdict(model_config),
@@ -234,8 +240,14 @@ def effective_experiment_config(
 
 
 def run(args: argparse.Namespace) -> None:
-    if min(args.updates, args.num_envs, args.steps_per_update) <= 0:
-        raise ValueError("updates, num-envs, and steps-per-update must be positive")
+    if min(
+        args.updates,
+        args.num_envs,
+        args.steps_per_update,
+        args.episode_steps,
+        args.turns_per_day,
+    ) <= 0:
+        raise ValueError("training and environment sizes must be positive")
     if args.checkpoint_every <= 0:
         raise ValueError("checkpoint-every must be positive")
     torch.manual_seed(args.seed)
@@ -253,7 +265,13 @@ def run(args: argparse.Namespace) -> None:
         trainer.optimizer.load_state_dict(checkpoint["optimizer"])
         trainer.updates = int(checkpoint["updates"])
 
-    environment = VecEnv(args.num_envs, seed=args.seed, auto_reset=True)
+    environment = VecEnv(
+        args.num_envs,
+        seed=args.seed,
+        auto_reset=True,
+        episode_steps=args.episode_steps,
+        turns_per_day=args.turns_per_day,
+    )
     if args.opponent == "v16":
         opponent = V16OpponentPolicy.from_path(
             args.opponent_path,
@@ -264,8 +282,8 @@ def run(args: argparse.Namespace) -> None:
         opponent = V9OpponentPolicy.from_path(
             args.opponent_path,
             configuration={
-                "episodeSteps": 720,
-                "turnsPerDay": 24,
+                "episodeSteps": args.episode_steps,
+                "turnsPerDay": args.turns_per_day,
                 "boardSize": environment.board_size,
                 "startingMoney": 3_000,
                 "shedCapacity": 100,
@@ -286,28 +304,33 @@ def run(args: argparse.Namespace) -> None:
         args.reward,
         reward_scale=args.reward_scale,
         discount=ppo_config.gamma,
+        terminal_score=args.terminal_score,
     )
     reward.reset(self_play, batch)
 
-    rule_policy = None
-    if args.market == "rule-scaffold" or args.opening == "rule":
-        rule_policy = build_policy(RuleConfig(), use_opening=True, liquidation_days=1)
-    economy = rule_policy if args.market == "rule-scaffold" else None
-    market = WorkforceMarketPolicy(economy, max_hires_per_turn=args.max_hires_per_turn)
-    opening = (
-        OpeningWarmStart(
-            rule_policy,
-            handoff_step=len(OPENING_BOOK),
-            episode_steps=720,
-        )
-        if args.opening == "rule" and rule_policy is not None
-        else None
+    rule_policy = build_policy(
+        RuleConfig(
+            episode_steps=args.episode_steps,
+            turns_per_day=args.turns_per_day,
+        ),
+        use_opening=True,
+        liquidation_days=1,
+    )
+    market = WorkforceMarketPolicy(
+        rule_policy, max_hires_per_turn=args.max_hires_per_turn
+    )
+    opening = OpeningWarmStart(
+        rule_policy,
+        handoff_step=len(OPENING_BOOK),
+        episode_steps=args.episode_steps,
     )
 
     args.metrics_file.parent.mkdir(parents=True, exist_ok=True)
     progress_disabled = not args.progress or not sys.stderr.isatty()
     cumulative_games = cumulative_wins = cumulative_ties = cumulative_losses = 0
     cumulative_margin = 0.0
+    cumulative_bank_margin = 0.0
+    target_update = trainer.updates + args.updates
     update_progress = tqdm(
         total=args.updates,
         desc="PPO",
@@ -320,7 +343,7 @@ def run(args: argparse.Namespace) -> None:
         update_progress.set_description(f"update {update_number}: rollout")
         if progress_disabled:
             print(
-                f"update {update_number}/{args.updates}: rollout",
+                f"update {update_number}/{target_update}: rollout",
                 file=sys.stderr,
                 flush=True,
             )
@@ -351,7 +374,7 @@ def run(args: argparse.Namespace) -> None:
         update_progress.set_description(f"update {update_number}: optimize")
         if progress_disabled:
             print(
-                f"update {update_number}/{args.updates}: optimize",
+                f"update {update_number}/{target_update}: optimize",
                 file=sys.stderr,
                 flush=True,
             )
@@ -371,17 +394,22 @@ def run(args: argparse.Namespace) -> None:
 
         episodes = collection.episodes
         workforce = collection.workforce
+        market_stats = collection.market
         profile = collection.profile
         cumulative_games += episodes.completed
         cumulative_wins += episodes.wins
         cumulative_ties += episodes.ties
         cumulative_losses += episodes.losses
         cumulative_margin += episodes.final_margin_sum
+        cumulative_bank_margin += episodes.final_bank_margin_sum
         cumulative_win_rate = (
             cumulative_wins / cumulative_games if cumulative_games else 0.0
         )
         cumulative_mean_margin = (
             cumulative_margin / cumulative_games if cumulative_games else 0.0
+        )
+        cumulative_mean_bank_margin = (
+            cumulative_bank_margin / cumulative_games if cumulative_games else 0.0
         )
         batch_margin_text = (
             f"{episodes.mean_final_margin:+,.0f}"
@@ -393,6 +421,11 @@ def run(args: argparse.Namespace) -> None:
         )
         batch_win_text = (
             f"{episodes.win_rate:.1%}" if episodes.completed else "n/a"
+        )
+        bank_margin_text = (
+            f"{episodes.mean_final_bank_margin:+,.0f}"
+            if episodes.completed
+            else "n/a"
         )
         cumulative_win_text = (
             f"{cumulative_win_rate:.1%}" if cumulative_games else "n/a"
@@ -463,17 +496,26 @@ def run(args: argparse.Namespace) -> None:
             "episodes/losses": episodes.losses,
             "episodes/win_rate": episodes.win_rate,
             "episodes/mean_final_margin": episodes.mean_final_margin,
+            "episodes/terminal_score": args.terminal_score.value,
+            "episodes/mean_final_bank_margin": episodes.mean_final_bank_margin,
             "episodes/cumulative_completed": cumulative_games,
             "episodes/cumulative_wins": cumulative_wins,
             "episodes/cumulative_ties": cumulative_ties,
             "episodes/cumulative_losses": cumulative_losses,
             "episodes/cumulative_win_rate": cumulative_win_rate,
             "episodes/cumulative_mean_final_margin": cumulative_mean_margin,
+            "episodes/cumulative_mean_final_bank_margin": cumulative_mean_bank_margin,
             "workforce/mean_target_hands": workforce.mean_target_hands,
             "workforce/mean_current_hands": workforce.mean_current_hands,
             "workforce/target_met_rate": workforce.target_met_rate,
             "workforce/hire_orders": workforce.hire_orders,
             "workforce/observed_hires": workforce.observed_hires,
+            "market/mean_economic_orders": market_stats.mean_economic_orders,
+            "market/mean_buy_orders": market_stats.mean_buy_orders,
+            "market/mean_sell_orders": market_stats.mean_sell_orders,
+            "market/economic_orders": market_stats.economic_orders,
+            "market/buy_orders": market_stats.buy_orders,
+            "market/sell_orders": market_stats.sell_orders,
             "memory/process_peak_rss_mb": process_peak_rss_mb(),
             "memory/gpu_allocated_mb": (
                 torch.cuda.memory_allocated(device) / (1024.0 * 1024.0)
@@ -493,42 +535,41 @@ def run(args: argparse.Namespace) -> None:
         line = json.dumps(metrics, sort_keys=True)
         with args.metrics_file.open("a", encoding="utf-8") as metrics_file:
             metrics_file.write(line + "\n")
+        result = (
+            f"u{trainer.updates:03d} | "
+            f"margin={batch_margin_text} run={cumulative_margin_text} "
+            f"bank={bank_margin_text} | "
+            f"win={batch_win_text} run={cumulative_win_text} | "
+            f"reward={stats.reward_mean:.3g}±{stats.reward_std:.3g} "
+            f"KL={stats.approximate_kl:.3g} EV={stats.explained_variance:.2f} | "
+            f"hands={workforce.mean_target_hands:.1f} | "
+            f"market={market_stats.mean_economic_orders:.1f} "
+            f"(buy={market_stats.mean_buy_orders:.1f}, "
+            f"sell={market_stats.mean_sell_orders:.1f}) | "
+            f"speed={profile.transitions_per_second:.0f}/"
+            f"{stats.samples_per_second:.0f}"
+        )
         if progress_disabled:
-            print(
-                f"update {trainer.updates}/{args.updates}: complete | "
-                f"rollout={profile.transitions_per_second:.0f} step/s | "
-                f"train={stats.samples_per_second:.0f} sample/s | "
-                f"games={episodes.completed} (total={cumulative_games}) | "
-                f"final_margin_avg={batch_margin_text} "
-                f"(running={cumulative_margin_text}) | "
-                f"win={batch_win_text} (all={cumulative_win_text}) | "
-                f"reward={stats.reward_mean:.3g}±{stats.reward_std:.3g} | "
-                f"KL={stats.approximate_kl:.3g} | "
-                f"EV={stats.explained_variance:.3f} | "
-                f"loss={stats.total_loss:.3g} | "
-                f"hands_now={workforce.mean_current_hands:.1f} | "
-                f"hands_target={workforce.mean_target_hands:.1f} | "
-                f"hires={workforce.observed_hires}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(result, file=sys.stderr, flush=True)
+        else:
+            update_progress.write(result, file=sys.stderr)
         update_progress.set_description(f"update {trainer.updates}: complete")
         update_progress.set_postfix(
-            games=f"{episodes.completed}/{cumulative_games}",
-            final_margin=batch_margin_text,
-            margin_running=cumulative_margin_text,
-            win=batch_win_text,
-            win_all=cumulative_win_text,
-            reward=f"{stats.reward_mean:.2g}±{stats.reward_std:.2g}",
+            margin=batch_margin_text,
+            margin_run=cumulative_margin_text,
+            win_run=cumulative_win_text,
             KL=f"{stats.approximate_kl:.2g}",
-            EV=f"{stats.explained_variance:.2f}",
-            loss=f"{stats.total_loss:.2g}",
-            rollout_sps=f"{profile.transitions_per_second:.0f}",
-            train_sps=f"{stats.samples_per_second:.0f}",
-            hands_now=f"{workforce.mean_current_hands:.1f}",
-            hands_target=f"{workforce.mean_target_hands:.1f}",
+            market=f"{market_stats.mean_economic_orders:.1f}",
         )
         update_progress.update()
+
+        # Do not carry the completed CPU rollout into the next iteration.
+        # Python evaluates the right-hand side of ``collection =
+        # collect_rollout(...)`` before replacing the previous collection, so
+        # leaving this reference alive makes update N+1 overlap two complete
+        # rollout buffers. Large vector batches can otherwise exhaust host RAM
+        # while the new rollout is being stacked.
+        del collection
 
     update_progress.close()
     save_checkpoint(

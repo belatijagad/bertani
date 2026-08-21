@@ -31,6 +31,7 @@ def test_default_model_stays_near_half_a_million_parameters() -> None:
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
 
     assert parameter_count == 476_348
+    assert parameter_count < 500_000
     assert model.encoder.spatial_input[0].out_channels == 64
     assert len(model.encoder.residual_blocks) == 5
 

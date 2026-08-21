@@ -30,7 +30,7 @@ except ModuleNotFoundError as error:
     # Kaggle archive remain portable without bundling a platform-specific .so.
     ITEM_COUNT = 12
     MARKET_ACTION_COUNT = 7
-    RL_API_VERSION = 2
+    RL_API_VERSION = 3
     UNIT_ACTION_COUNT = 18
     NativeVecEnv = None  # type: ignore[assignment,misc]
 
@@ -87,9 +87,9 @@ class Item(IntEnum):
     SHEEP = 11
 
 
-if RL_API_VERSION != 2:
+if RL_API_VERSION != 3:
     raise RuntimeError(
-        f"unsupported native RL API version {RL_API_VERSION}; expected version 2"
+        f"unsupported native RL API version {RL_API_VERSION}; expected version 3"
     )
 if len(UnitOp) != UNIT_ACTION_COUNT:
     raise RuntimeError("Python UnitOp IDs do not match the native extension")
@@ -140,6 +140,7 @@ class Batch:
     active_units: BoolArray
     rewards: Float64Array
     economic_values: Float64Array
+    terminal_economic_values: Float64Array
     dones: BoolArray
     episode_ids: UInt64Array
     overflow: BoolArray
@@ -258,6 +259,7 @@ class VecEnv:
         self._active_units = self._active_unit_bytes.view(np.bool_)
         self._rewards = np.empty((n, 2), dtype=np.float64)
         self._economic_values = np.empty((n, 2), dtype=np.float64)
+        self._terminal_economic_values = np.empty((n, 2), dtype=np.float64)
         self._done_bytes = np.zeros((n, 2), dtype=np.uint8)
         self._dones = self._done_bytes.view(np.bool_)
         self._episode_ids = np.empty((n,), dtype=np.uint64)
@@ -278,6 +280,7 @@ class VecEnv:
             active_units=self._active_units,
             rewards=self._rewards,
             economic_values=self._economic_values,
+            terminal_economic_values=self._terminal_economic_values,
             dones=self._dones,
             episode_ids=self._episode_ids,
             overflow=self._overflow,
@@ -379,6 +382,7 @@ class VecEnv:
             self._active_unit_bytes,
             self._rewards,
             self._economic_values,
+            self._terminal_economic_values,
             self._done_bytes,
             self._episode_ids,
             self._overflow_bytes,
@@ -439,6 +443,7 @@ class VecEnv:
             self._active_unit_bytes,
             self._rewards,
             self._economic_values,
+            self._terminal_economic_values,
             self._done_bytes,
             self._episode_ids,
             self._overflow_bytes,

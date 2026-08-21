@@ -10,9 +10,10 @@ from .math import (
     policy_entropy,
     value_loss,
 )
-from .rewards import CompetitiveReward, RewardMode
+from .rewards import CompetitiveReward, RewardMode, TerminalScore
 from .rollout import (
     EpisodeStats,
+    MarketStats,
     RolloutCollection,
     RolloutProfile,
     WorkforceStats,
@@ -25,6 +26,7 @@ __all__ = [
     "CompetitiveReward",
     "EpisodeStats",
     "LearnerMarketPolicy",
+    "MarketStats",
     "OpeningPolicy",
     "OpeningWarmStart",
     "PPOActions",
@@ -33,6 +35,7 @@ __all__ = [
     "PPOStats",
     "PPOTrainer",
     "RewardMode",
+    "TerminalScore",
     "RolloutBatch",
     "RolloutCollection",
     "RolloutProfile",

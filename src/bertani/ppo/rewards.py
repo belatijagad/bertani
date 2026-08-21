@@ -18,6 +18,11 @@ class RewardMode(StrEnum):
     WIN_LOSS = "win_loss"
 
 
+class TerminalScore(StrEnum):
+    BANK = "bank"
+    NET_WORTH = "net_worth"
+
+
 class CompetitiveReward:
     """Convert raw final coins into a stable learner-relative reward."""
 
@@ -28,6 +33,7 @@ class CompetitiveReward:
         starting_money: float = 3_000.0,
         reward_scale: float = 10_000.0,
         discount: float = 1.0,
+        terminal_score: TerminalScore = TerminalScore.BANK,
     ) -> None:
         if starting_money <= 0:
             raise ValueError("starting_money must be positive")
@@ -39,6 +45,7 @@ class CompetitiveReward:
         self.starting_money = starting_money
         self.reward_scale = reward_scale
         self.discount = discount
+        self.terminal_score = terminal_score
         self._margin: np.ndarray | None = None
 
     def reset(self, self_play: SelfPlayEnv, batch: Batch) -> None:
@@ -52,9 +59,7 @@ class CompetitiveReward:
         opponent = self_play.opponent_seats
         dones = batch.dones[games, learner]
         next_margin = self._state_margin(self_play, batch)
-        final_margin = (
-            batch.rewards[games, learner] - batch.rewards[games, opponent]
-        ) / self.starting_money
+        final_margin = self.terminal_margin(self_play, batch) / self.starting_money
 
         if self.mode == RewardMode.NET_WORTH_DELTA:
             final_margin = final_margin * self.starting_money / self.reward_scale
@@ -77,6 +82,21 @@ class CompetitiveReward:
         # observation at terminal transitions.
         self._margin = next_margin
         return torch.from_numpy(np.asarray(reward, dtype=np.float32))
+
+    def terminal_margin(
+        self, self_play: SelfPlayEnv, batch: Batch
+    ) -> np.ndarray:
+        """Return the configured unscaled terminal score difference."""
+
+        games = self_play.games
+        learner = self_play.learner_seats
+        opponent = self_play.opponent_seats
+        values = (
+            batch.rewards
+            if self.terminal_score == TerminalScore.BANK
+            else batch.terminal_economic_values
+        )
+        return values[games, learner] - values[games, opponent]
 
     def _state_margin(
         self, self_play: SelfPlayEnv, batch: Batch
@@ -104,4 +124,4 @@ class CompetitiveReward:
         ).astype(np.float64, copy=True)
 
 
-__all__ = ["CompetitiveReward", "RewardMode"]
+__all__ = ["CompetitiveReward", "RewardMode", "TerminalScore"]

@@ -10,7 +10,7 @@ import yaml
 
 from ..models import ActorCriticConfig
 from .config import PPOConfig
-from .rewards import RewardMode
+from .rewards import RewardMode, TerminalScore
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,13 +18,14 @@ class PPOExperimentConfig:
     max_updates: int
     n_envs: int
     seed: int
+    episode_steps: int
+    turns_per_day: int
     device: str
     opponent: str
     opponent_path: Path
     reward: RewardMode
     reward_scale: float
-    opening: str
-    market: str
+    terminal_score: TerminalScore
     max_hires_per_turn: int
     checkpoint_path: Path
     resume: Path | None
@@ -39,16 +40,14 @@ class PPOExperimentConfig:
         positive = {
             "max_updates": self.max_updates,
             "n_envs": self.n_envs,
+            "episode_steps": self.episode_steps,
+            "turns_per_day": self.turns_per_day,
             "checkpoint_every": self.checkpoint_every,
             "max_hires_per_turn": self.max_hires_per_turn,
         }
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
-        if self.market not in {"rule-scaffold", "workforce-only"}:
-            raise ValueError("market must be rule-scaffold or workforce-only")
-        if self.opening not in {"none", "rule"}:
-            raise ValueError("opening must be none or rule")
         if self.opponent not in {"v9", "v16"}:
             raise ValueError("opponent must be v9 or v16")
         if self.reward_scale <= 0:
@@ -142,7 +141,11 @@ def load_experiment_config(
     }
     _exact_fields(gpu, gpu_fields, "gpu_config")
     environment = _mapping(raw["env_config"], "env_config")
-    _exact_fields(environment, {"n_envs", "seed"}, "env_config")
+    _exact_fields(
+        environment,
+        {"n_envs", "seed", "episode_steps", "turns_per_day"},
+        "env_config",
+    )
     self_play = _mapping(raw["self_play_config"], "self_play_config")
     _exact_fields(
         self_play,
@@ -151,8 +154,7 @@ def load_experiment_config(
             "opponent_path",
             "reward",
             "reward_scale",
-            "opening",
-            "market",
+            "terminal_score",
             "max_hires_per_turn",
         },
         "self_play_config",
@@ -205,6 +207,8 @@ def load_experiment_config(
         max_updates=int(raw["max_updates"]),
         n_envs=int(environment["n_envs"]),
         seed=int(environment["seed"]),
+        episode_steps=int(environment["episode_steps"]),
+        turns_per_day=int(environment["turns_per_day"]),
         device=str(raw["device"]),
         opponent=str(self_play["opponent"]),
         opponent_path=_path(
@@ -212,8 +216,7 @@ def load_experiment_config(
         ),
         reward=RewardMode(str(self_play["reward"])),
         reward_scale=float(self_play["reward_scale"]),
-        opening=str(self_play["opening"]),
-        market=str(self_play["market"]),
+        terminal_score=TerminalScore(str(self_play["terminal_score"])),
         max_hires_per_turn=int(self_play["max_hires_per_turn"]),
         checkpoint_path=_path(raw["checkpoint_path"], root, "checkpoint_path"),
         resume=_optional_path(raw["resume"], root, "resume"),

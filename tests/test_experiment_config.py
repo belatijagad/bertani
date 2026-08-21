@@ -5,43 +5,51 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bertani.ppo import RewardMode, load_experiment_config
+from bertani.ppo import RewardMode, TerminalScore, load_experiment_config
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "scripts" / "config" / "ppo_default.yaml"
-HIRE4_CONFIG = ROOT / "scripts" / "config" / "ppo_hire4.yaml"
-NET_WORTH_CONFIG = ROOT / "scripts" / "config" / "ppo_net_worth.yaml"
-OPENING_CONFIG = ROOT / "scripts" / "config" / "ppo_net_worth_opening.yaml"
+CONFIG_DIR = ROOT / "scripts" / "config"
+PPO_14D_CONFIG = CONFIG_DIR / "ppo_14d.yaml"
 
 
-def test_default_ppo_experiment_config_loads_all_sections() -> None:
-    config = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
+def test_14_day_ppo_config_loads_the_supported_experiment() -> None:
+    config = load_experiment_config(PPO_14D_CONFIG, root=ROOT)
 
-    assert config.max_updates > 0
-    # Experiment-scale knobs are intentionally edited in this file between
-    # runs; this test verifies they parse instead of pinning one machine size.
-    assert config.n_envs > 0
-    assert config.ppo.steps_per_update > 0
-    assert config.ppo.minibatch_size > 0
-    assert config.reward is RewardMode.MARGIN_DELTA
-    assert config.reward_scale == 10_000
-    assert config.opening == "none"
+    assert config.max_updates == 300
+    assert config.n_envs == 256
+    assert config.episode_steps == 14 * 24
+    assert config.turns_per_day == 24
     assert config.opponent == "v16"
     assert config.opponent_path == ROOT / "baselines" / "v16_rc5" / "main.py"
+    assert config.reward is RewardMode.NET_WORTH_DELTA
+    assert config.reward_scale == 10_000
+    assert config.terminal_score is TerminalScore.NET_WORTH
+    assert config.max_hires_per_turn == 2
+    assert config.resume is None
+    assert config.checkpoint_path == ROOT / "outputs" / "ppo-14d" / "latest.pt"
+    assert config.metrics_file == ROOT / "outputs" / "ppo-14d" / "metrics.jsonl"
     assert config.ppo.learning_rate == 1e-4
     assert config.ppo.adam_epsilon == 3e-4
     assert config.ppo.max_gradient_norm == 10.0
+    assert config.ppo.normalize_advantages
+    assert config.ppo.include_workforce
     assert config.ppo.compile_model
     assert config.ppo.compile_mode == "default"
     assert config.ppo.channels_last
     assert config.ppo.fused_optimizer
     assert config.ppo.preload_rollout
-    assert config.model.global_channels == 77
     assert config.model.d_model == 64
+    assert config.model.n_blocks == 5
+    assert config.model.max_hands == 16
+    assert config.model.workforce_prior_hands == 5
+
+
+def test_only_one_ppo_experiment_config_is_kept() -> None:
+    assert list(CONFIG_DIR.glob("*.yaml")) == [PPO_14D_CONFIG]
 
 
 def test_experiment_config_rejects_unknown_fields(tmp_path: Path) -> None:
-    with DEFAULT_CONFIG.open(encoding="utf-8") as config_file:
+    with PPO_14D_CONFIG.open(encoding="utf-8") as config_file:
         values = yaml.safe_load(config_file)
     values["typo_field"] = 1
     path = tmp_path / "invalid.yaml"
@@ -49,34 +57,3 @@ def test_experiment_config_rejects_unknown_fields(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unknown config fields: typo_field"):
         load_experiment_config(path, root=ROOT)
-
-
-def test_hire4_experiment_is_an_isolated_ablation() -> None:
-    baseline = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
-    experiment = load_experiment_config(HIRE4_CONFIG, root=ROOT)
-
-    assert experiment.max_updates == 100
-    assert experiment.max_hires_per_turn == 4
-    assert baseline.max_hires_per_turn == 2
-    assert experiment.metrics_file != baseline.metrics_file
-    assert experiment.checkpoint_path != baseline.checkpoint_path
-
-
-def test_net_worth_experiment_is_an_isolated_reward_ablation() -> None:
-    baseline = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
-    experiment = load_experiment_config(NET_WORTH_CONFIG, root=ROOT)
-
-    assert experiment.reward is RewardMode.NET_WORTH_DELTA
-    assert experiment.reward_scale == 10_000
-    assert experiment.max_hires_per_turn == baseline.max_hires_per_turn
-    assert experiment.metrics_file != baseline.metrics_file
-    assert experiment.checkpoint_path != baseline.checkpoint_path
-
-
-def test_opening_experiment_has_rule_handoff_and_workforce_prior() -> None:
-    experiment = load_experiment_config(OPENING_CONFIG, root=ROOT)
-
-    assert experiment.opening == "rule"
-    assert experiment.reward is RewardMode.NET_WORTH_DELTA
-    assert experiment.model.workforce_prior_hands == 5
-    assert experiment.model.workforce_prior_std == 2.0

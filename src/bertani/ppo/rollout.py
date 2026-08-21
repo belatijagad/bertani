@@ -26,6 +26,7 @@ class EpisodeStats:
     ties: int = 0
     losses: int = 0
     final_margin_sum: float = 0.0
+    final_bank_margin_sum: float = 0.0
 
     @property
     def win_rate(self) -> float:
@@ -34,6 +35,10 @@ class EpisodeStats:
     @property
     def mean_final_margin(self) -> float:
         return self.final_margin_sum / self.completed if self.completed else 0.0
+
+    @property
+    def mean_final_bank_margin(self) -> float:
+        return self.final_bank_margin_sum / self.completed if self.completed else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,28 @@ class WorkforceStats:
     @property
     def target_met_rate(self) -> float:
         return self.targets_met / self.decisions if self.decisions else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class MarketStats:
+    """Aggregate executed learner economic orders."""
+
+    decisions: int = 0
+    economic_orders: int = 0
+    buy_orders: int = 0
+    sell_orders: int = 0
+
+    @property
+    def mean_economic_orders(self) -> float:
+        return self.economic_orders / self.decisions if self.decisions else 0.0
+
+    @property
+    def mean_buy_orders(self) -> float:
+        return self.buy_orders / self.decisions if self.decisions else 0.0
+
+    @property
+    def mean_sell_orders(self) -> float:
+        return self.sell_orders / self.decisions if self.decisions else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +116,7 @@ class RolloutCollection:
     rollout: RolloutBatch
     episodes: EpisodeStats
     workforce: WorkforceStats
+    market: MarketStats
     profile: RolloutProfile
 
 
@@ -135,12 +163,14 @@ def collect_rollout(
     opening_transitions = 0
     completed = wins = ties = losses = 0
     final_margin_sum = 0.0
+    final_bank_margin_sum = 0.0
     workforce_decisions = 0
     target_hands_sum = 0
     current_hands_sum = 0
     workforce_targets_met = 0
     hire_orders = 0
     observed_hires = 0
+    economic_orders = buy_orders = sell_orders = 0
     cache_before = self_play.opponent.cache_stats
 
     for _ in range(config.steps_per_update):
@@ -229,6 +259,20 @@ def collect_rollout(
         hire_orders += int(
             (active_orders & (learner_market[..., 0] == int(MarketOp.HIRE))).sum()
         )
+        economic = active_orders & (
+            learner_market[..., 0] != int(MarketOp.NONE)
+        ) & (learner_market[..., 0] != int(MarketOp.HIRE))
+        buys = economic & (
+            (learner_market[..., 0] == int(MarketOp.BUY_LAND))
+            | (learner_market[..., 0] == int(MarketOp.BUY_SEED))
+            | (learner_market[..., 0] == int(MarketOp.BUY_PRODUCT))
+            | (learner_market[..., 0] == int(MarketOp.BUY_ANIMAL))
+        )
+        economic_orders += int(economic.sum())
+        buy_orders += int(buys.sum())
+        sell_orders += int(
+            (economic & (learner_market[..., 0] == int(MarketOp.SELL))).sum()
+        )
         timings["market"] += time.perf_counter() - started
         self_play.step(
             unit_actions,
@@ -260,15 +304,19 @@ def collect_rollout(
         if terminal.size:
             learner = self_play.learner_seats[terminal]
             opponent = self_play.opponent_seats[terminal]
-            margins = (
+            bank_margins = (
                 self_play.batch.rewards[terminal, learner]
                 - self_play.batch.rewards[terminal, opponent]
             )
-            completed += len(margins)
-            wins += int((margins > 0).sum())
-            ties += int((margins == 0).sum())
-            losses += int((margins < 0).sum())
-            final_margin_sum += float(margins.sum())
+            score_margins = reward.terminal_margin(self_play, self_play.batch)[
+                terminal
+            ]
+            completed += len(score_margins)
+            wins += int((score_margins > 0).sum())
+            ties += int((score_margins == 0).sum())
+            losses += int((score_margins < 0).sum())
+            final_margin_sum += float(score_margins.sum())
+            final_bank_margin_sum += float(bank_margins.sum())
         timings["reward"] += time.perf_counter() - started
         if step_callback is not None:
             step_callback()
@@ -324,6 +372,7 @@ def collect_rollout(
             ties=ties,
             losses=losses,
             final_margin_sum=final_margin_sum,
+            final_bank_margin_sum=final_bank_margin_sum,
         ),
         workforce=WorkforceStats(
             decisions=workforce_decisions,
@@ -332,6 +381,12 @@ def collect_rollout(
             targets_met=workforce_targets_met,
             hire_orders=hire_orders,
             observed_hires=observed_hires,
+        ),
+        market=MarketStats(
+            decisions=workforce_decisions,
+            economic_orders=economic_orders,
+            buy_orders=buy_orders,
+            sell_orders=sell_orders,
         ),
         profile=RolloutProfile(
             total_seconds=time.perf_counter() - total_started,
@@ -359,5 +414,6 @@ __all__ = [
     "RolloutCollection",
     "RolloutProfile",
     "WorkforceStats",
+    "MarketStats",
     "collect_rollout",
 ]

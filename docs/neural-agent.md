@@ -93,7 +93,7 @@ V16 is intentionally isolated from both neural encoding and rule planning:
 
 Removing the rule-based package therefore does not require changing V16.
 
-V9 remains available for harder evaluation and later curriculum stages.
+V9 remains available for comparison runs through the command-line override.
 
 Compose `V9OpponentPolicy` with `SelfPlayEnv` to train against
 `references/v9_main_restarted.py`. The wrapper alternates learner seats across
@@ -150,13 +150,13 @@ Start a training run with:
 uv run python scripts/train_ppo.py
 ```
 
-The default experiment is defined in
-`scripts/config/ppo_default.yaml`, following Isaiah's grouped PPO config
-layout. Copy it for an experiment and pass the new file explicitly:
+The supported experiment is defined in `scripts/config/ppo_14d.yaml`, following
+Isaiah's grouped PPO config layout. Keep temporary ablations outside the
+repository and pass one explicitly when needed:
 
 ```bash
-cp scripts/config/ppo_default.yaml scripts/config/ppo_worker_ablation.yaml
-uv run python scripts/train_ppo.py --config scripts/config/ppo_worker_ablation.yaml
+cp scripts/config/ppo_14d.yaml /tmp/ppo_worker_ablation.yaml
+uv run python scripts/train_ppo.py --config /tmp/ppo_worker_ablation.yaml
 ```
 
 Command-line options still override the loaded file for quick one-off changes,
@@ -170,24 +170,22 @@ individual optimizations when comparing hardware or debugging. Compilation is
 lazy, so the first rollout and optimizer pass include graph-compilation time;
 judge throughput from later updates.
 
-The default `margin_delta` reward is the per-turn change in normalized bank
-margin. It telescopes to the final margin without discarding information about
-how strongly a game was won or lost. `terminal_margin` and `win_loss` can be
-selected with `--reward`.
+The experiment uses per-turn changes in normalized economic net-worth margin,
+with final net worth as the terminal score. Other reward modes remain available
+through `--reward` for short diagnostic runs.
 
-The current neural baseline has worker and workforce heads but no complete
-market decoder. By default, `--market rule-scaffold` retains the rule policy's
-buy, sell, land, seed, and animal orders while replacing its hires with the
-network's workforce target. This gives worker PPO a functioning economy without
-pretending those economic actions were sampled by the neural policy. Use
-`--market workforce-only` to remove that scaffold.
+The neural baseline controls worker actions and the desired number of hands.
+The rule policy supplies buy, sell, land, seed, and animal orders; its hire
+orders are replaced by the network's workforce target. This keeps the current
+experiment focused on worker learning without attributing rule-market actions
+to the neural policy.
 
 Training displays an overall `tqdm` update bar plus nested rollout-step and
 optimizer-minibatch bars. The active phase is shown explicitly, with rollout
 and training throughput, loss, and recent win rate in the main postfix. Disable
 the bars for batch jobs with `--no-progress`.
 
-Every update is also appended as JSON to `outputs/ppo-v16/metrics.jsonl`. Metrics
+Every update is also appended as JSON to `outputs/ppo-14d/metrics.jsonl`. Metrics
 include:
 
 - Observation packing, device transfer, neural forward, and action transfer

@@ -269,6 +269,7 @@ def observation_batch(obs: object, config: RuleConfig) -> Batch:
         active_units=active_units,
         rewards=np.zeros((1, 2), dtype=np.float64),
         economic_values=np.zeros((1, 2), dtype=np.float64),
+        terminal_economic_values=np.zeros((1, 2), dtype=np.float64),
         dones=np.zeros((1, 2), dtype=np.bool_),
         episode_ids=np.zeros(1, dtype=np.uint64),
         overflow=np.zeros((1, 2), dtype=np.bool_),

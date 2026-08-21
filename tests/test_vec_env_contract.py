@@ -167,6 +167,7 @@ def _native_outputs(native: NativeVecEnv) -> tuple[np.ndarray, ...]:
         np.zeros(specs["unit_active_shape"], dtype=np.uint8),
         np.zeros(specs["reward_shape"], dtype=np.float64),
         np.zeros(specs["reward_shape"], dtype=np.float64),
+        np.zeros(specs["reward_shape"], dtype=np.float64),
         np.zeros(specs["done_shape"], dtype=np.uint8),
         np.zeros(specs["episode_id_shape"], dtype=np.uint64),
         np.zeros(specs["overflow_shape"], dtype=np.uint8),

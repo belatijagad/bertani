@@ -26,6 +26,7 @@ def test_batches_and_named_views_reuse_the_same_memory() -> None:
         "masks": initial.action_masks.ctypes.data,
         "rewards": initial.rewards.ctypes.data,
         "economic_values": initial.economic_values.ctypes.data,
+        "terminal_economic_values": initial.terminal_economic_values.ctypes.data,
         "dones": initial.dones.ctypes.data,
     }
 
@@ -36,6 +37,10 @@ def test_batches_and_named_views_reuse_the_same_memory() -> None:
     assert stepped.action_masks.ctypes.data == pointers["masks"]
     assert stepped.rewards.ctypes.data == pointers["rewards"]
     assert stepped.economic_values.ctypes.data == pointers["economic_values"]
+    assert (
+        stepped.terminal_economic_values.ctypes.data
+        == pointers["terminal_economic_values"]
+    )
     assert stepped.dones.ctypes.data == pointers["dones"]
     assert np.shares_memory(
         stepped.observations, stepped.observation_views.global_features
@@ -121,6 +126,10 @@ def test_terminal_reward_snapshot_and_auto_reset_are_unambiguous() -> None:
 
     np.testing.assert_array_equal(terminal_step.dones, [[True, True]])
     np.testing.assert_array_equal(terminal_step.rewards, [[2_980.0, 3_000.0]])
+    np.testing.assert_array_equal(
+        terminal_step.terminal_economic_values,
+        [[3_000.0, 3_000.0]],
+    )
 
     current = env.state_snapshot(0)
     terminal = env.terminal_snapshot(0)

@@ -19,6 +19,7 @@ from bertani.ppo import (
     PPOConfig,
     PPOTrainer,
     RewardMode,
+    TerminalScore,
     WorkforceMarketPolicy,
     clipped_policy_loss,
     collect_rollout,
@@ -133,6 +134,41 @@ def test_net_worth_reward_defers_asset_purchase_cost_until_terminal() -> None:
     np.testing.assert_array_equal(terminal.economic_values, [[3_000.0, 3_000.0]])
 
 
+def test_short_episode_terminal_uses_pre_reset_net_worth() -> None:
+    environment = VecEnv(
+        1,
+        auto_reset=True,
+        episode_steps=2,
+        turns_per_day=2,
+        max_market_orders=1,
+        weed_spawn_chance=0.0,
+    )
+    self_play = SelfPlayEnv(
+        environment,
+        _PassOpponent(environment),  # type: ignore[arg-type]
+    )
+    batch = self_play.reset(np.asarray([8], dtype=np.uint64))
+    reward = CompetitiveReward(
+        RewardMode.NET_WORTH_DELTA,
+        reward_scale=10_000,
+        terminal_score=TerminalScore.NET_WORTH,
+    )
+    reward.reset(self_play, batch)
+    units = np.zeros((1, environment.max_units, 3), dtype=np.int64)
+    market = np.zeros((1, environment.max_orders, 3), dtype=np.int64)
+    market[0, 0] = (MarketOp.BUY_SEED, 1, 1)
+
+    terminal = self_play.step(units, market, np.asarray([1], dtype=np.int64))
+    terminal_reward = reward.transition(self_play, terminal)
+
+    torch.testing.assert_close(terminal_reward, torch.zeros(1))
+    np.testing.assert_array_equal(terminal.economic_values, [[3_000.0, 3_000.0]])
+    np.testing.assert_array_equal(
+        terminal.terminal_economic_values,
+        [[3_000.0, 3_000.0]],
+    )
+
+
 def test_rule_opening_warm_start_hands_control_to_ppo_at_day_three() -> None:
     environment = VecEnv(1, weed_spawn_chance=0.0)
     self_play = SelfPlayEnv(
@@ -217,7 +253,12 @@ def test_collect_and_update_ppo_smoke() -> None:
     collection = collect_rollout(
         self_play,
         model,
-        WorkforceMarketPolicy(max_hires_per_turn=1),
+        WorkforceMarketPolicy(
+            build_policy(
+                RuleConfig(episode_steps=3, turns_per_day=3), use_opening=False
+            ),
+            max_hires_per_turn=1,
+        ),
         reward,
         config,
         device=torch.device("cpu"),
@@ -241,6 +282,11 @@ def test_collect_and_update_ppo_smoke() -> None:
     assert collection.workforce.decisions == 4
     assert collection.workforce.hire_orders >= collection.workforce.observed_hires
     assert 0.0 <= collection.workforce.target_met_rate <= 1.0
+    assert collection.market.decisions == 4
+    assert collection.market.economic_orders >= collection.market.sell_orders
+    assert collection.market.economic_orders == (
+        collection.market.buy_orders + collection.market.sell_orders
+    )
     assert collection.episodes.completed == 2
     assert (
         collection.episodes.wins + collection.episodes.ties + collection.episodes.losses
@@ -286,7 +332,12 @@ def test_cuda_update_uses_gpu_optimized_layout_and_rollout_preload() -> None:
     collection = collect_rollout(
         self_play,
         model,
-        WorkforceMarketPolicy(max_hires_per_turn=1),
+        WorkforceMarketPolicy(
+            build_policy(
+                RuleConfig(episode_steps=3, turns_per_day=3), use_opening=False
+            ),
+            max_hires_per_turn=1,
+        ),
         reward,
         config,
         device=torch.device("cuda"),

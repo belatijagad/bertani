@@ -24,11 +24,11 @@ class LearnerMarketPolicy(Protocol):
 
 
 class WorkforceMarketPolicy:
-    """Translate the workforce head into hires, optionally over an economy policy."""
+    """Replace rule-policy hires with hires selected by the workforce head."""
 
     def __init__(
         self,
-        base_policy: VectorRulePolicy | None = None,
+        base_policy: VectorRulePolicy,
         *,
         max_hires_per_turn: int = 2,
     ) -> None:
@@ -56,13 +56,11 @@ class WorkforceMarketPolicy:
         self._lengths.fill(0)
         games = np.arange(environments, dtype=np.int64)
 
-        base_actions = None
-        if self.base_policy is not None:
-            seat_mask = np.zeros((environments, 2), dtype=np.bool_)
-            seat_mask[games, seats] = True
-            base_actions = self.base_policy.act(
-                batch, max_orders=max_orders, seat_mask=seat_mask
-            )
+        seat_mask = np.zeros((environments, 2), dtype=np.bool_)
+        seat_mask[games, seats] = True
+        base_actions = self.base_policy.act(
+            batch, max_orders=max_orders, seat_mask=seat_mask
+        )
 
         current_hands = (
             batch.active_units[games, seats].sum(axis=-1).astype(np.int64) - 1
@@ -75,16 +73,13 @@ class WorkforceMarketPolicy:
             output: list[tuple[int, int, int]] = [
                 (int(MarketOp.HIRE), 0, 0)
             ] * int(hire_counts[environment])
-            if base_actions is not None:
-                seat = int(seats[environment])
-                length = int(base_actions.market_lengths[environment, seat])
-                output.extend(
-                    tuple(int(value) for value in row)
-                    for row in base_actions.market_actions[
-                        environment, seat, :length
-                    ]
-                    if int(row[0]) != int(MarketOp.HIRE)
-                )
+            seat = int(seats[environment])
+            length = int(base_actions.market_lengths[environment, seat])
+            output.extend(
+                tuple(int(value) for value in row)
+                for row in base_actions.market_actions[environment, seat, :length]
+                if int(row[0]) != int(MarketOp.HIRE)
+            )
             output = output[:max_orders]
             self._lengths[environment] = len(output)
             if output:
