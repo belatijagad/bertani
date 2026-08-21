@@ -291,7 +291,8 @@ def run(args: argparse.Namespace) -> None:
         update_progress.set_description(f"update {update_number}: rollout")
         if progress_disabled:
             print(
-                json.dumps({"update": update_number, "phase": "rollout"}),
+                f"update {update_number}/{args.updates}: rollout",
+                file=sys.stderr,
                 flush=True,
             )
         rollout_progress = tqdm(
@@ -320,7 +321,8 @@ def run(args: argparse.Namespace) -> None:
         update_progress.set_description(f"update {update_number}: optimize")
         if progress_disabled:
             print(
-                json.dumps({"update": update_number, "phase": "optimize"}),
+                f"update {update_number}/{args.updates}: optimize",
+                file=sys.stderr,
                 flush=True,
             )
         optimize_progress = tqdm(
@@ -338,6 +340,7 @@ def run(args: argparse.Namespace) -> None:
         optimize_progress.close()
 
         episodes = collection.episodes
+        workforce = collection.workforce
         profile = collection.profile
         cumulative_games += episodes.completed
         cumulative_wins += episodes.wins
@@ -417,6 +420,11 @@ def run(args: argparse.Namespace) -> None:
             "episodes/cumulative_mean_final_margin": (
                 cumulative_margin / cumulative_games if cumulative_games else 0.0
             ),
+            "workforce/mean_target_hands": workforce.mean_target_hands,
+            "workforce/mean_current_hands": workforce.mean_current_hands,
+            "workforce/target_met_rate": workforce.target_met_rate,
+            "workforce/hire_orders": workforce.hire_orders,
+            "workforce/observed_hires": workforce.observed_hires,
             "memory/process_peak_rss_mb": process_peak_rss_mb(),
             "memory/gpu_allocated_mb": (
                 torch.cuda.memory_allocated(device) / (1024.0 * 1024.0)
@@ -437,15 +445,32 @@ def run(args: argparse.Namespace) -> None:
         with args.metrics_file.open("a", encoding="utf-8") as metrics_file:
             metrics_file.write(line + "\n")
         if progress_disabled:
-            print(line, flush=True)
-        else:
-            tqdm.write(line)
+            episode_status = (
+                f"win={episodes.win_rate:.1%}"
+                if episodes.completed
+                else "win=n/a"
+            )
+            print(
+                f"update {trainer.updates}/{args.updates}: complete | "
+                f"rollout={profile.transitions_per_second:.0f} step/s | "
+                f"train={stats.samples_per_second:.0f} sample/s | "
+                f"loss={stats.total_loss:.3g} | {episode_status} | "
+                f"hands={workforce.mean_current_hands:.1f}/"
+                f"{workforce.mean_target_hands:.1f} | "
+                f"hires={workforce.observed_hires}",
+                file=sys.stderr,
+                flush=True,
+            )
         update_progress.set_description(f"update {trainer.updates}: complete")
         update_progress.set_postfix(
             rollout_sps=f"{profile.transitions_per_second:.0f}",
             train_sps=f"{stats.samples_per_second:.0f}",
             loss=f"{stats.total_loss:.3g}",
             win=f"{episodes.win_rate:.1%}" if episodes.completed else "n/a",
+            hands=(
+                f"{workforce.mean_current_hands:.1f}/"
+                f"{workforce.mean_target_hands:.1f}"
+            ),
         )
         update_progress.update()
 

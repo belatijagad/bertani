@@ -10,7 +10,13 @@ from .math import (
     value_loss,
 )
 from .rewards import CompetitiveReward, RewardMode
-from .rollout import EpisodeStats, RolloutCollection, RolloutProfile, collect_rollout
+from .rollout import (
+    EpisodeStats,
+    RolloutCollection,
+    RolloutProfile,
+    WorkforceStats,
+    collect_rollout,
+)
 from .storage import PPOActions, RolloutBatch, TrainingBatch
 from .trainer import PPOStats, PPOTrainer
 
@@ -29,6 +35,7 @@ __all__ = [
     "RolloutProfile",
     "TrainingBatch",
     "WorkforceMarketPolicy",
+    "WorkforceStats",
     "clipped_policy_loss",
     "collect_rollout",
     "generalized_advantage_estimate",

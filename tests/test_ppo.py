@@ -178,6 +178,9 @@ def test_collect_and_update_ppo_smoke() -> None:
     assert collection.profile.total_seconds > 0.0
     assert collection.profile.policy_forward_seconds > 0.0
     assert collection.profile.synchronized
+    assert collection.workforce.decisions == 4
+    assert collection.workforce.hire_orders >= collection.workforce.observed_hires
+    assert 0.0 <= collection.workforce.target_met_rate <= 1.0
     assert collection.episodes.completed == 2
     assert (
         collection.episodes.wins + collection.episodes.ties + collection.episodes.losses

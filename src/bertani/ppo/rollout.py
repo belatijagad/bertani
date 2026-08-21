@@ -11,6 +11,7 @@ import torch
 
 from ..models import ActorCritic, TorchActionInfo, TorchObservation
 from ..self_play import SelfPlayEnv
+from ..vec_env import MarketOp
 from .config import PPOConfig
 from .market import LearnerMarketPolicy
 from .rewards import CompetitiveReward
@@ -32,6 +33,30 @@ class EpisodeStats:
     @property
     def mean_final_margin(self) -> float:
         return self.final_margin_sum / self.completed if self.completed else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class WorkforceStats:
+    """Aggregate neural workforce decisions and resulting hire activity."""
+
+    decisions: int = 0
+    target_hands_sum: int = 0
+    current_hands_sum: int = 0
+    targets_met: int = 0
+    hire_orders: int = 0
+    observed_hires: int = 0
+
+    @property
+    def mean_target_hands(self) -> float:
+        return self.target_hands_sum / self.decisions if self.decisions else 0.0
+
+    @property
+    def mean_current_hands(self) -> float:
+        return self.current_hands_sum / self.decisions if self.decisions else 0.0
+
+    @property
+    def target_met_rate(self) -> float:
+        return self.targets_met / self.decisions if self.decisions else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +85,7 @@ class RolloutProfile:
 class RolloutCollection:
     rollout: RolloutBatch
     episodes: EpisodeStats
+    workforce: WorkforceStats
     profile: RolloutProfile
 
 
@@ -103,6 +129,12 @@ def collect_rollout(
     }
     completed = wins = ties = losses = 0
     final_margin_sum = 0.0
+    workforce_decisions = 0
+    target_hands_sum = 0
+    current_hands_sum = 0
+    workforce_targets_met = 0
+    hire_orders = 0
+    observed_hires = 0
     cache_before = self_play.opponent.cache_stats
 
     for _ in range(config.steps_per_update):
@@ -157,14 +189,31 @@ def collect_rollout(
             packed_actions[:, -1],
         )
         unit_actions = unit_action_tensor.numpy()
+        target_hands = sampled_actions.target_hands.numpy()
+        games = self_play.games
+        seats = self_play.learner_seats
+        current_hands = (
+            self_play.batch.active_units[games, seats].sum(axis=-1) - 1
+        )
+        workforce_decisions += len(target_hands)
+        target_hands_sum += int(target_hands.sum())
+        current_hands_sum += int(current_hands.sum())
+        workforce_targets_met += int((current_hands >= target_hands).sum())
         timings["action_transfer"] += time.perf_counter() - started
 
         started = time.perf_counter()
         learner_market, learner_market_lengths = market_policy.actions(
             self_play.batch,
             self_play.learner_seats,
-            sampled_actions.target_hands.numpy(),
+            target_hands,
             max_orders=self_play.environment.max_orders,
+        )
+        active_orders = (
+            np.arange(self_play.environment.max_orders)[None, :]
+            < learner_market_lengths[:, None]
+        )
+        hire_orders += int(
+            (active_orders & (learner_market[..., 0] == int(MarketOp.HIRE))).sum()
         )
         timings["market"] += time.perf_counter() - started
         self_play.step(
@@ -172,6 +221,10 @@ def collect_rollout(
             learner_market,
             learner_market_lengths,
         )
+        next_hands = (
+            self_play.batch.active_units[games, seats].sum(axis=-1) - 1
+        )
+        observed_hires += int(np.maximum(next_hands - current_hands, 0).sum())
         step_profile = self_play.last_step_profile
         timings["opponent"] += step_profile.opponent_seconds
         timings["composition"] += step_profile.composition_seconds
@@ -258,6 +311,14 @@ def collect_rollout(
             losses=losses,
             final_margin_sum=final_margin_sum,
         ),
+        workforce=WorkforceStats(
+            decisions=workforce_decisions,
+            target_hands_sum=target_hands_sum,
+            current_hands_sum=current_hands_sum,
+            targets_met=workforce_targets_met,
+            hire_orders=hire_orders,
+            observed_hires=observed_hires,
+        ),
         profile=RolloutProfile(
             total_seconds=time.perf_counter() - total_started,
             observation_seconds=timings["observation"],
@@ -281,5 +342,6 @@ __all__ = [
     "EpisodeStats",
     "RolloutCollection",
     "RolloutProfile",
+    "WorkforceStats",
     "collect_rollout",
 ]

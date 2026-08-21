@@ -9,6 +9,7 @@ from bertani.ppo import RewardMode, load_experiment_config
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "scripts" / "config" / "ppo_default.yaml"
+HIRE4_CONFIG = ROOT / "scripts" / "config" / "ppo_hire4.yaml"
 
 
 def test_default_ppo_experiment_config_loads_all_sections() -> None:
@@ -44,3 +45,14 @@ def test_experiment_config_rejects_unknown_fields(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unknown config fields: typo_field"):
         load_experiment_config(path, root=ROOT)
+
+
+def test_hire4_experiment_is_an_isolated_ablation() -> None:
+    baseline = load_experiment_config(DEFAULT_CONFIG, root=ROOT)
+    experiment = load_experiment_config(HIRE4_CONFIG, root=ROOT)
+
+    assert experiment.max_updates == 100
+    assert experiment.max_hires_per_turn == 4
+    assert baseline.max_hires_per_turn == 2
+    assert experiment.metrics_file != baseline.metrics_file
+    assert experiment.checkpoint_path != baseline.checkpoint_path
