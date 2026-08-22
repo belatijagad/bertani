@@ -11,9 +11,12 @@ import importlib.util
 import io
 import json
 import platform
+import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "bertani"
@@ -30,13 +33,26 @@ MODULES = (
     "kaggle_agent.py",
 )
 
-MAIN = b'''"""Bertani rule-based Kaggriculture submission."""
+
+def _main_module(rule_source: Path) -> str:
+    """Return a package import when the strategy lives in ``src``."""
+
+    try:
+        relative = rule_source.resolve().relative_to(RULE_PACKAGE_SOURCE.resolve())
+    except ValueError:
+        return "rules"
+    return ".".join(("bertani_rules", *relative.with_suffix("").parts))
+
+
+def _main_payload(rule_source: Path) -> bytes:
+    module = _main_module(rule_source)
+    return f'''"""Bertani rule-based Kaggriculture submission."""
 from bertani.kaggle_agent import make_agent
-from rules import build_policy
+from {module} import build_policy
 
 agent = make_agent(build_policy)
 __all__ = ["agent"]
-'''
+'''.encode()
 
 
 def _native_extension() -> Path:
@@ -75,7 +91,7 @@ def archive_members(rule_source: Path = RULE_SOURCE) -> dict[str, bytes]:
     native_member = f"bertani/{native.name}"
 
     members: dict[str, bytes] = {
-        "main.py": MAIN,
+        "main.py": _main_payload(rule_source),
         "bertani/__init__.py": (SOURCE / "__init__.py").read_bytes(),
         "rules.py": rule_payload,
         native_member: native.read_bytes(),
@@ -180,6 +196,58 @@ def build_archive(output: Path, rule_source: Path = RULE_SOURCE) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def smoke_test_archive(output: Path) -> list[dict[str, Any]]:
+    """Run the packaged ``main.py`` in the original Python environment.
+
+    Extraction happens in a fresh directory and a fresh interpreter so local
+    editable source modules cannot hide missing archive members.
+    """
+
+    program = """
+import json
+from pathlib import Path
+
+from kaggle_environments import make
+
+import bertani
+import rules
+
+root = Path.cwd().resolve()
+assert Path(bertani.__file__).resolve().is_relative_to(root)
+assert Path(rules.__file__).resolve().is_relative_to(root)
+
+environment = make(
+    "kaggriculture",
+    configuration={"episodeSteps": 720, "seed": 11},
+    debug=True,
+)
+environment.run(["main.py", "pass"])
+result = [
+    {"status": str(state.status), "reward": float(state.reward or 0.0)}
+    for state in environment.steps[-1]
+]
+print(json.dumps(result))
+"""
+    with tempfile.TemporaryDirectory(prefix="bertani-submission-") as directory:
+        extracted = Path(directory)
+        with tarfile.open(output, "r:gz") as archive:
+            archive.extractall(extracted, filter="data")
+        completed = subprocess.run(
+            (sys.executable, "-c", program),
+            cwd=extracted,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    if not isinstance(result, list) or any(
+        state.get("status") != "DONE" for state in result
+    ):
+        raise RuntimeError(f"submission smoke test did not finish: {result!r}")
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -194,6 +262,11 @@ def main() -> None:
         default=DEFAULT_OUTPUT,
         help=(f"archive destination (default: {DEFAULT_OUTPUT.relative_to(ROOT)})"),
     )
+    parser.add_argument(
+        "--no-smoke-test",
+        action="store_true",
+        help="skip running the isolated archive in kaggle-environments",
+    )
     args = parser.parse_args()
 
     output = args.output.resolve()
@@ -201,6 +274,15 @@ def main() -> None:
     digest = build_archive(output, strategy)
     print(f"built {output}")
     print(f"sha256 {digest}")
+    if not args.no_smoke_test:
+        result = smoke_test_archive(output)
+        print(
+            "smoke test "
+            + ", ".join(
+                f"seat {seat}: {state['status']} reward={state['reward']:.0f}"
+                for seat, state in enumerate(result)
+            )
+        )
 
 
 if __name__ == "__main__":

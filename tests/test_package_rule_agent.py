@@ -31,6 +31,9 @@ def test_custom_python_strategy_builds_a_self_contained_archive(tmp_path: Path) 
     assert len(digest) == 64
     with tarfile.open(output, "r:gz") as archive:
         names = set(archive.getnames())
+        main = archive.extractfile("main.py")
+        assert main is not None
+        main_source = main.read().decode()
     assert {
         "main.py",
         "rules.py",
@@ -39,3 +42,7 @@ def test_custom_python_strategy_builds_a_self_contained_archive(tmp_path: Path) 
         "bertani_rules/strategies/simple.py",
     }.issubset(names)
     assert any(name.startswith("bertani/_rust") for name in names)
+    assert "from bertani_rules.strategies.simple import build_policy" in main_source
+
+    result = packager.smoke_test_archive(output)
+    assert [state["status"] for state in result] == ["DONE", "DONE"]

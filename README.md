@@ -83,8 +83,9 @@ waiting, while urgency bands 12 and above retain the whole workforce. See
 
 ## Write strategies in Python
 
-Teammates do not need to write Rust. Add a module under
-`src/bertani_rules/strategies/` and define one batch-first function:
+Teammates do not need to write Rust. Copy
+`src/bertani_rules/strategies/simple.py` to a new module in the same directory,
+then edit its one batch-first function:
 
 ```python
 import numpy as np
@@ -117,6 +118,21 @@ actions, processes the market, and simulates the game. See the copyable
 [`current.py`](src/bertani_rules/strategies/current.py) competitive-policy
 entry point. The complete target and feature contract is documented in
 [the rule-based agent guide](docs/rule-based-agent.md).
+
+Evaluate the edited module against the current policy or a preserved baseline
+in both seat orders:
+
+```bash
+uv run maturin develop --release
+uv run python scripts/pit_agents.py \
+  src/bertani_rules/strategies/my_strategy.py \
+  src/bertani_rules/strategies/current.py \
+  --seeds 11 451781128 874717982 \
+  --json-output outputs/my-strategy-vs-current.json
+```
+
+Replace the second path with `baselines/v16_rc5/main.py` to evaluate against
+V16-RC5. Both paths use the original `kaggle-environments` match runner.
 
 Run validation with:
 
@@ -201,8 +217,13 @@ Package another Python strategy by pointing at its module:
 ```bash
 uv run python scripts/package_rule_agent.py \
   --strategy src/bertani_rules/strategies/simple.py \
-  --output dist/simple_rule_submission.tar.gz
+  --output submission.tar.gz
 ```
+
+Packaging automatically extracts the archive into a temporary directory and
+runs its `main.py` for a full season through the original Python
+`kaggle-environments` implementation. It fails instead of leaving a bad
+submission behind if either agent does not finish with `DONE` status.
 
 This writes `dist/rule_based_submission.tar.gz` with `main.py` at the archive
 root. All concrete decisions live in `src/bertani_rules/agent.py`; reusable

@@ -54,6 +54,39 @@ This interface is fast because Python is not called once per environment,
 farmer, or farm hand. One callback handles the entire batch, and its arrays are
 reused on following turns.
 
+## End-to-end workflow
+
+Copy and edit the example:
+
+```bash
+cp src/bertani_rules/strategies/simple.py \
+  src/bertani_rules/strategies/my_strategy.py
+```
+
+Build the native runtime once, then play both seat orders on common seeds:
+
+```bash
+uv run maturin develop --release
+uv run python scripts/pit_agents.py \
+  src/bertani_rules/strategies/my_strategy.py \
+  src/bertani_rules/strategies/current.py \
+  --seeds 11 451781128 874717982 \
+  --json-output outputs/my-strategy-vs-current.json
+```
+
+Create the competition artifact:
+
+```bash
+uv run python scripts/package_rule_agent.py \
+  --strategy src/bertani_rules/strategies/my_strategy.py \
+  --output submission.tar.gz
+```
+
+The packaging command performs a full-season smoke test from an isolated
+extraction directory using `kaggle_environments`. The archive contains
+`main.py`, the selected strategy, reusable Python modules, and the compiled
+ABI3 Rust extension. Submit `submission.tar.gz` directly.
+
 Rule-based policies are vectorizable. Vectorization means evaluating the same
 operations over a batch of environments; it does not require a neural network.
 Dense decisions such as phase selection, resource counting, price comparison,
