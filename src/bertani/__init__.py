@@ -1,4 +1,4 @@
-"""Fast Rust tooling for the Kaggriculture reinforcement-learning competition."""
+"""Fast Rust tooling for developing Kaggriculture rule-based agents."""
 
 from .market import MarketPlanBatch, MarketRule
 from .opening import (

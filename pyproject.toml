@@ -1,7 +1,7 @@
 [project]
 name = "bertani"
 version = "0.1.0"
-description = "Fast Rust tooling for the Kaggriculture reinforcement-learning competition"
+description = "Fast Rust tooling for developing Kaggriculture rule-based agents"
 readme = "README.md"
 authors = [
     { name = "belatijagad", email = "belatijagadbintangsyuhada@gmail.com" }

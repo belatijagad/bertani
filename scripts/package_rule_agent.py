@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "bertani"
 RULE_SOURCE = ROOT / "src" / "bertani_rules" / "agent.py"
+RULE_PACKAGE_SOURCE = ROOT / "src" / "bertani_rules"
 DEFAULT_OUTPUT = ROOT / "dist" / "rule_based_submission.tar.gz"
 
 MODULES = (
@@ -37,8 +38,6 @@ agent = make_agent(build_policy)
 __all__ = ["agent"]
 '''
 
-INIT = b'"""Portable Bertani rule-agent abstractions."""\n'
-
 
 def _native_extension() -> Path:
     """Locate the already-built ``bertani._rust`` extension."""
@@ -55,8 +54,7 @@ def _native_extension() -> Path:
         raise FileNotFoundError(f"native extension is missing: {path}")
 
     if not any(
-        path.name.endswith(suffix)
-        for suffix in importlib.machinery.EXTENSION_SUFFIXES
+        path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES
     ):
         raise RuntimeError(
             f"bertani._rust did not resolve to a CPython extension: {path}"
@@ -64,21 +62,21 @@ def _native_extension() -> Path:
     return path
 
 
-def archive_members() -> dict[str, bytes]:
+def archive_members(rule_source: Path = RULE_SOURCE) -> dict[str, bytes]:
     """Collect the Python agent and its native route solver."""
 
-    if not RULE_SOURCE.is_file():
-        raise FileNotFoundError(f"rule strategy is missing: {RULE_SOURCE}")
+    if not rule_source.is_file():
+        raise FileNotFoundError(f"rule strategy is missing: {rule_source}")
 
-    rule_payload = RULE_SOURCE.read_bytes()
-    compile(rule_payload, str(RULE_SOURCE), "exec")
+    rule_payload = rule_source.read_bytes()
+    compile(rule_payload, str(rule_source), "exec")
 
     native = _native_extension()
     native_member = f"bertani/{native.name}"
 
     members: dict[str, bytes] = {
         "main.py": MAIN,
-        "bertani/__init__.py": INIT,
+        "bertani/__init__.py": (SOURCE / "__init__.py").read_bytes(),
         "rules.py": rule_payload,
         native_member: native.read_bytes(),
     }
@@ -86,12 +84,24 @@ def archive_members() -> dict[str, bytes]:
     for name in MODULES:
         path = SOURCE / name
         if not path.is_file():
-            raise FileNotFoundError(
-                f"required rule-agent module is missing: {path}"
-            )
+            raise FileNotFoundError(f"required rule-agent module is missing: {path}")
         payload = path.read_bytes()
         compile(payload, str(path), "exec")
         members[f"bertani/{name}"] = payload
+
+    for name in ("__init__.py", "agent.py", "strategy.py"):
+        path = RULE_PACKAGE_SOURCE / name
+        if not path.is_file():
+            raise FileNotFoundError(f"required rule-agent module is missing: {path}")
+        payload = path.read_bytes()
+        compile(payload, str(path), "exec")
+        members[f"bertani_rules/{name}"] = payload
+
+    strategy_directory = RULE_PACKAGE_SOURCE / "strategies"
+    for path in sorted(strategy_directory.glob("*.py")):
+        payload = path.read_bytes()
+        compile(payload, str(path), "exec")
+        members[f"bertani_rules/strategies/{path.name}"] = payload
 
     manifest = {
         "format": 2,
@@ -111,35 +121,37 @@ def archive_members() -> dict[str, bytes]:
     return members
 
 
-def build_archive(output: Path) -> str:
+def build_archive(output: Path, rule_source: Path = RULE_SOURCE) -> str:
     """Write an order-stable, timestamp-free tar.gz and return its SHA-256."""
 
-    members = archive_members()
+    members = archive_members(rule_source)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    with output.open("wb") as raw:
-        with gzip.GzipFile(
+    with (
+        output.open("wb") as raw,
+        gzip.GzipFile(
             filename="",
             fileobj=raw,
             mode="wb",
             mtime=0,
-        ) as zipped:
-            with tarfile.open(
-                fileobj=zipped,
-                mode="w",
-                format=tarfile.PAX_FORMAT,
-            ) as archive:
-                for name in sorted(members):
-                    payload = members[name]
-                    info = tarfile.TarInfo(name)
-                    info.size = len(payload)
-                    info.mode = 0o755 if name.endswith(".so") else 0o644
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(payload))
+        ) as zipped,
+        tarfile.open(
+            fileobj=zipped,
+            mode="w",
+            format=tarfile.PAX_FORMAT,
+        ) as archive,
+    ):
+        for name in sorted(members):
+            payload = members[name]
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o755 if name.endswith(".so") else 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(payload))
 
     payload = output.read_bytes()
     with tarfile.open(output, "r:gz") as archive:
@@ -163,9 +175,7 @@ def build_archive(output: Path) -> str:
             )
         for member in archive.getmembers():
             if not member.isfile():
-                raise RuntimeError(
-                    f"unexpected non-file archive member: {member.name}"
-                )
+                raise RuntimeError(f"unexpected non-file archive member: {member.name}")
 
     return hashlib.sha256(payload).hexdigest()
 
@@ -173,18 +183,22 @@ def build_archive(output: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--strategy",
+        type=Path,
+        default=RULE_SOURCE,
+        help="Python module defining build_policy (default: current strategy)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help=(
-            "archive destination "
-            f"(default: {DEFAULT_OUTPUT.relative_to(ROOT)})"
-        ),
+        help=(f"archive destination (default: {DEFAULT_OUTPUT.relative_to(ROOT)})"),
     )
     args = parser.parse_args()
 
     output = args.output.resolve()
-    digest = build_archive(output)
+    strategy = args.strategy.resolve()
+    digest = build_archive(output, strategy)
     print(f"built {output}")
     print(f"sha256 {digest}")
 

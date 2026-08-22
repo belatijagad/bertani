@@ -1,6 +1,7 @@
 # Bertani
 
-Fast, reproducible tooling for the [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture) reinforcement-learning competition.
+Fast, reproducible tooling for developing rule-based agents for the
+[Kaggriculture](https://www.kaggle.com/competitions/kaggriculture) competition.
 
 Bertani mirrors the advanced Kaggriculture environment in a pure Rust rules engine, then layers a parallel, NumPy-first vector environment on top. Python and serialization stay outside the simulation hot path.
 
@@ -80,6 +81,43 @@ policy keeps one planting lane open when at least eight seed-backed jobs are
 waiting, while urgency bands 12 and above retain the whole workforce. See
 [the rule-based agent architecture](docs/rule-based-agent.md).
 
+## Write strategies in Python
+
+Teammates do not need to write Rust. Add a module under
+`src/bertani_rules/strategies/` and define one batch-first function:
+
+```python
+import numpy as np
+
+from bertani import Item, RuleConfig, RuleFeatures
+from bertani.kaggle_agent import make_agent
+from bertani_rules.strategy import RulePlan, build_python_policy
+
+
+def plan(features: RuleFeatures, targets: RulePlan) -> None:
+    active = ~targets.liquidate
+    targets.target_hands[active] = np.where(features.day[active] < 5, 4, 8)
+    targets.wheat_reserve[active] = 6
+    targets.crop(Item.WHEAT)[active] = 12
+    targets.crop(Item.CARROT)[active] = 6
+    targets.animal(Item.COW)[active] = 4
+
+
+def build_policy(config: RuleConfig | None = None):
+    return build_python_policy(plan, config)
+
+
+agent = make_agent(build_policy)
+```
+
+Python chooses only economic targets once per vector batch. Native code still
+extracts features, creates farm tasks, assigns and routes workers, encodes
+actions, processes the market, and simulates the game. See the copyable
+[`simple.py`](src/bertani_rules/strategies/simple.py) and the
+[`current.py`](src/bertani_rules/strategies/current.py) competitive-policy
+entry point. The complete target and feature contract is documented in
+[the rule-based agent guide](docs/rule-based-agent.md).
+
 Run validation with:
 
 ```bash
@@ -88,13 +126,18 @@ uv run cargo clippy --workspace --all-targets -- -D warnings
 uv run pytest -q
 ```
 
-Run the benchmark scopes with:
+Benchmark the Rust rules engine with:
 
 ```bash
 cargo run --release -p kaggriculture-core --example benchmark -- 10000
-uv run python scripts/benchmark_python.py 3
+```
+
+Compare native pass-game throughput with the Python strategy interface and the
+current rule policy:
+
+```bash
 uv run maturin develop --release
-uv run python scripts/benchmark_vec_env.py
+uv run python scripts/benchmark_rule_interface.py --include-current
 ```
 
 Run submission-compatible agents on common seeds in both seat orders with:
@@ -132,17 +175,6 @@ agent does not import or execute its action trace. Continue using
 `pit_agents.py` as the final Kaggle-format check and `pit_v16_native.py` for
 broad searches.
 
-Compare daily rule-agent state, inventory, purchases, sales, and unit actions
-against all downloaded leaderboard replays with:
-
-```bash
-uv run python scripts/analyze_replay_gap.py
-```
-
-The compact report is written to `outputs/replay-gap.json`. It includes daily
-leader quartiles, the current rule median, and separate shop-configuration
-clusters so incompatible leaderboard branches are not reduced to one policy.
-
 Render one full local game and immediately open the standalone replay in the
 default browser with:
 
@@ -164,6 +196,14 @@ uv run maturin develop --release
 uv run python scripts/package_rule_agent.py
 ```
 
+Package another Python strategy by pointing at its module:
+
+```bash
+uv run python scripts/package_rule_agent.py \
+  --strategy src/bertani_rules/strategies/simple.py \
+  --output dist/simple_rule_submission.tar.gz
+```
+
 This writes `dist/rule_based_submission.tar.gz` with `main.py` at the archive
 root. All concrete decisions live in `src/bertani_rules/agent.py`; reusable
 planning and execution abstractions remain under `src/bertani`. The bundled
@@ -172,12 +212,6 @@ ABI3 Rust extension built by the preceding `maturin` command.
 
 On this development machine, the typed Rust core ran about 4,350 pass/pass episodes/second (0.230 ms/episode), while the full Python Kaggle framework ran about 1.15 episodes/second (872 ms/episode). That ratio is useful for capacity planning but is deliberately not presented as a core-to-core comparison: the Python timing also includes framework, schema, and agent orchestration.
 
-Regenerate the Python reference trace after an intentional oracle update with:
-
-```bash
-uv run python scripts/export_reference_trace.py --agents starter,pass --seed 11
-```
-
 See [the rules-engine notes](docs/rules-engine.md) for the exact transition order and parity contract. The fixed-shape training boundary is documented in [the vector-environment API](docs/vector-environment.md).
 
 ## Layout
@@ -185,8 +219,9 @@ See [the rules-engine notes](docs/rules-engine.md) for the exact transition orde
 ```text
 crates/kaggriculture-core/  deterministic Rust simulator
 crates/bertani-python/      PyO3 vector environment and encoders
-scripts/                    Python-oracle fixture generation
+scripts/                    packaging, match, replay, and download utilities
 baselines/                  immutable submission-compatible opponents
 src/bertani/                typed Python wrapper and NumPy buffer views
+src/bertani_rules/          Python strategy API and rule-agent modules
 references/                 local competition references; gitignored
 ```

@@ -1,5 +1,59 @@
 # Rule-based agent architecture
 
+## Recommended Python interface
+
+Use `bertani_rules.strategy.build_python_policy` for new agents. It gives
+Python a compact strategic surface while retaining the native runtime for the
+expensive work:
+
+```text
+Rust VecEnv observation
+    -> Rust feature reduction
+    -> one Python plan(features, targets) call per batch
+    -> Rust market and farm-task generation
+    -> Rust workforce assignment, routing, and action encoding
+    -> Rust simulation
+```
+
+The callback receives `RuleFeatures`, whose arrays all begin with
+`[environment, player]`, and a reusable `RulePlan`. Fill targets with NumPy
+masks rather than looping over games:
+
+```python
+import numpy as np
+
+from bertani import Item, RuleConfig, RuleFeatures
+from bertani_rules.strategy import RulePlan, build_python_policy
+
+
+def plan(features: RuleFeatures, targets: RulePlan) -> None:
+    active = ~targets.liquidate
+    targets.target_hands[active] = np.where(features.day[active] < 5, 4, 8)
+    targets.cash_reserve[active] = 200
+    targets.wheat_reserve[active] = 6
+    targets.crop(Item.WHEAT)[active] = 12
+    targets.animal(Item.COW)[active] = 4
+
+
+def build_policy(config: RuleConfig | None = None):
+    return build_python_policy(plan, config)
+```
+
+Every plan is cleared before the callback, and the final day is marked for
+liquidation by default. Available read-only features are `step`, `day`, `hour`,
+`money`, crop and animal counts, shed and seed counts, unlocked-shop counts,
+opponent crop counts, and market price ratios. Writable targets are phase,
+hands, cash and wheat reserves, crop and animal counts, and liquidation.
+
+Put team strategies under `src/bertani_rules/strategies/`. Start from
+`simple.py`; `current.py` exposes the existing competitive strategy beside it.
+Pass `use_current_opening=True` to `build_python_policy` only when a strategy is
+compatible with the current fixed 72-turn opening.
+
+This interface is fast because Python is not called once per environment,
+farmer, or farm hand. One callback handles the entire batch, and its arrays are
+reused on following turns.
+
 Rule-based policies are vectorizable. Vectorization means evaluating the same
 operations over a batch of environments; it does not require a neural network.
 Dense decisions such as phase selection, resource counting, price comparison,
@@ -23,26 +77,28 @@ VecEnv Batch
 
 `StrategicIntent` contains phase, hiring targets, cash and wheat reserves,
 crop/animal targets, and liquidation flags. `VectorRulePolicy` supplies a
-neutral no-op intent by default. V1 supplies its opening, midgame, workforce,
-production, reserve, and liquidation choices through `V1IntentPlanner`. A
+neutral no-op intent by default. The current strategy supplies its opening,
+midgame, workforce, production, reserve, and liquidation choices through
+`IntentPlanner`. A
 custom callable passed as `intent_planner=` changes strategy without replacing
 action legality and serialization. Version factories may offer
 `use_opening=False` to train or evaluate from the initial state.
 
 ## Version boundaries
 
-All V1 decisions are colocated in `src/bertani_rules/v1.py`:
+All current strategy decisions are colocated in `src/bertani_rules/agent.py`:
 
 - the 72-turn opening book and its pasture-recovery parameters;
 - phase, workforce, reserve, crop, animal, and liquidation targets;
 - maintenance, production, logistics, and market rule classes;
-- `build_policy()`, which composes V1 on the reusable engine.
+- `build_policy()`, which composes the strategy on the reusable engine.
 
 `src/bertani/` contains only reusable representations, feature extraction,
 opening-book execution, task arbitration, scheduling, action serialization,
-the Kaggle observation adapter, and the vector environment wrapper. A new
-version should copy `v1.py` to `v2.py` and change decisions there, without
-editing the abstraction package.
+the Kaggle observation adapter, and the vector environment wrapper. Experimental
+strategies should remain outside that abstraction package. Preserve competitive
+submission snapshots under `baselines/` when a stable comparison point is
+needed.
 
 The opening controller owns steps 0–71 (days 0–2). Its nominal action book is
 the sequence observed in submission `55463512`, but it inspects the planned
@@ -69,7 +125,7 @@ highest-priority proposal, making arbitration independent of rule ordering when
 priorities differ. `TaskBatch.set_global()` adds named logistics tasks without
 inventing fake board tiles.
 
-The V1 strategy in `src/bertani_rules/v1.py` defines a
+The current strategy in `src/bertani_rules/agent.py` defines a
 `MaintenanceTaskRule` that proposes work in this priority order:
 
 1. feed;
@@ -102,7 +158,7 @@ class BuildPastureRule:
             priority=250.0,
         )
 
-from bertani_rules.v1 import MaintenanceTaskRule
+from bertani_rules.agent import MaintenanceTaskRule
 
 policy = VectorRulePolicy(task_rules=(MaintenanceTaskRule(), BuildPastureRule()))
 ```
@@ -110,12 +166,12 @@ policy = VectorRulePolicy(task_rules=(MaintenanceTaskRule(), BuildPastureRule())
 The `intent` argument lets production rules respond to the current strategic
 targets without coupling those targets to movement or action encoding.
 
-V1's `ProductionTaskRule` fills the observed wheat/melon footprint after harvest,
+The strategy's `ProductionTaskRule` fills the observed wheat/melon footprint after harvest,
 clears weeds that obstruct future production, and routes units carrying
 harvests or fertilizer back to the nearest shed access tile. One-time crops are
 harvested on their maximum-yield day rather than at first maturity.
 
-V1's `EconomyMarketRule` sells deposited products when their price is healthy or
+The strategy's `EconomyMarketRule` sells deposited products when their price is healthy or
 the shed is under pressure, protects the livestock wheat reserve, buys missing
 feed and replacement seeds, and hires toward the daily workforce target. The
 executor sells every remaining shed product during liquidation.
@@ -141,7 +197,7 @@ Use it with the vector environment:
 
 ```python
 from bertani import VecEnv
-from bertani_rules.v1 import build_policy
+from bertani_rules.agent import build_policy
 
 env = VecEnv(num_envs=256, seed=11)
 policy = build_policy()  # Opening controller enabled by default.
